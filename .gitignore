@@ -1,0 +1,50 @@
+# --- Secrets / per-user config ---
+# Real config with API keys (use config.example.json as template)
+config.json
+.claude/settings.local.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- PyInstaller / build outputs ---
+build/
+dist/
+*.spec.bak
+
+# --- Inno Setup output ---
+Output/
+*.iss.bak
+
+# --- Runtime artifacts ---
+logs/
+*.log
+
+# --- Diagnostics ---
+_diag_*.txt
+_diag_*.out
+
+# --- IDE / editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Claude Code (keep agent dir but ignore local-only state) ---
+# settings.local.json holds per-machine permissions; not for sharing

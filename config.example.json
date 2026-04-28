@@ -1,0 +1,36 @@
+{
+  "selected_api": "claude",
+  "source_lang": "자동감지",
+  "target_lang": "한국어",
+  "translation_prompt": "",
+  "user_dictionary": "",
+  "download_dir": "",
+  "apis": {
+    "openai": {
+      "api_keys": [],
+      "model": "gpt-4o-mini"
+    },
+    "papago": {
+      "client_id": "",
+      "client_secret": ""
+    },
+    "google": {
+      "api_keys": []
+    },
+    "deepl": {
+      "api_keys": [],
+      "use_free": false
+    },
+    "gemini": {
+      "api_keys": [],
+      "model": "gemini-2.5-flash"
+    },
+    "claude": {
+      "path": "",
+      "model": "haiku"
+    },
+    "pixiv": {
+      "session_id": ""
+    }
+  }
+}
