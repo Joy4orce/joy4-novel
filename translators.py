@@ -138,6 +138,65 @@ def _llm_extras(cfg) -> str:
     return ("\n\n".join(parts) + "\n\n") if parts else ""
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM 응답 후처리 — 모델이 시스템 프롬프트를 어기고 사고 과정/서두를 본문에
+# 그대로 출력하는 경우를 정리.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# `<thinking>...</thinking>` 같은 의사 thinking 블록 (변종 태그명도 포함)
+_THINK_TAGS = r"(?:thinking|think|reasoning|reason|scratchpad|analysis|reflection|internal|monologue)"
+
+# 완전한 블록: <thinking>...</thinking>  (대소문자/공백 허용, 중첩 단순 처리)
+_RE_THINK_BLOCK = re.compile(
+    rf"<\s*{_THINK_TAGS}\s*>.*?<\s*/\s*{_THINK_TAGS}\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# 떠돌이 닫기 태그만 있는 경우 — 그 앞 내용 전부와 태그를 제거
+_RE_STRAY_CLOSE = re.compile(
+    rf"\A.*?<\s*/\s*{_THINK_TAGS}\s*>\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# 떠돌이 여는 태그가 끝까지 닫히지 않은 경우 — 태그 이후를 잘라낼 수 없으므로
+# 태그 위치에서 뒤를 살리되, 태그 자체는 제거 (보수적으로 한 줄만 제거).
+_RE_STRAY_OPEN = re.compile(
+    rf"<\s*{_THINK_TAGS}\s*>[^\n]*\n?",
+    re.IGNORECASE,
+)
+
+# 흔한 영문 서두 (한 줄짜리). 줄 끝 콜론/마침표까지 함께 제거.
+_PREFACE_PATTERNS = [
+    r"^\s*(?:sure|okay|ok|alright|of course|certainly|absolutely)[,!\.]?\s*"
+    r"(?:here(?:'s| is)|i(?:'ll| will))\b[^\n]*\n",
+    r"^\s*here(?:'s| is)\s+(?:the\s+)?(?:korean\s+)?translation[^\n]*\n",
+    r"^\s*translation\s*[:\-]\s*\n",
+    r"^\s*(?:translated\s+text|번역(?:문|결과)?)\s*[:\-]\s*\n",
+]
+_RE_PREFACES = [re.compile(p, re.IGNORECASE) for p in _PREFACE_PATTERNS]
+
+
+def _strip_llm_preamble(text: str) -> str:
+    """모델이 본문에 흘린 사고 과정/서두를 제거."""
+    if not text:
+        return text
+    out = text
+    # 1) 완전한 <thinking>...</thinking> 블록 제거 (반복 적용)
+    while True:
+        new = _RE_THINK_BLOCK.sub("", out)
+        if new == out:
+            break
+        out = new
+    # 2) 떠돌이 </thinking> — 그 앞 내용까지 통째로 제거
+    out = _RE_STRAY_CLOSE.sub("", out)
+    # 3) 떠돌이 <thinking> 여는 태그만 있는 경우 — 태그 한 줄만 제거
+    out = _RE_STRAY_OPEN.sub("", out)
+    # 4) 흔한 영문 서두 라인 제거
+    for rx in _RE_PREFACES:
+        out = rx.sub("", out, count=1)
+    return out.strip()
+
+
 # API별 청크당 최대 문자 수 (요청 타임아웃 방지 및 진행률 가시성)
 MAX_CHARS = {
     "openai":   6000,
@@ -402,8 +461,14 @@ class GeminiTranslator:
         src = source_lang_name or "자동감지"
         tgt = target_lang_name or "Korean"
         extras = _llm_extras(cfg)
-        prompt = (f"Translate the following text from {src} to {tgt}. "
-                  f"Return only the translated text without any explanation.\n\n"
+        prompt = (f"Translate the following text from {src} to {tgt}.\n\n"
+                  f"OUTPUT RULES (strict):\n"
+                  f"1. Output ONLY the translated text. Nothing else.\n"
+                  f"2. Do NOT think out loud or narrate your process.\n"
+                  f"3. Do NOT use <thinking>, <reasoning>, or any meta tags.\n"
+                  f"4. Do NOT write a preface, header, label, or commentary.\n"
+                  f"5. The first and last characters of your response MUST be "
+                  f"the first and last characters of the translation itself.\n\n"
                   f"{extras}"
                   f"TEXT:\n{text}")
 
@@ -445,7 +510,7 @@ class GeminiTranslator:
             if not parts or "text" not in parts[0]:
                 fr = cand.get("finishReason", "?")
                 raise TranslationError(f"Gemini 응답에 텍스트 없음 (finishReason={fr}) | {str(cand)[:300]}")
-            return parts[0]["text"].strip()
+            return _strip_llm_preamble(parts[0]["text"])
 
         return self._rot.run(keys, call)
 
@@ -582,9 +647,17 @@ class ClaudeTranslator:
         src = source_lang_name or "자동감지"
         tgt = target_lang_name or "Korean"
         system = (f"You are a professional translator. "
-                  f"Translate the user's text from {src} to {tgt}. "
-                  f"Return only the translated text without any explanation, "
-                  f"preface, or commentary.\n\n"
+                  f"Translate the user's text from {src} to {tgt}.\n\n"
+                  f"OUTPUT RULES (these are strict):\n"
+                  f"1. Output ONLY the translated text. Nothing else.\n"
+                  f"2. Do NOT think out loud, deliberate, or narrate your process.\n"
+                  f"3. Do NOT use <thinking>, <reasoning>, or any meta tags.\n"
+                  f"4. Do NOT write a preface, header, label, or commentary "
+                  f"(no \"Here's the translation:\", no \"Translation:\", etc.).\n"
+                  f"5. The VERY FIRST character of your response MUST be the "
+                  f"first character of the translated text itself.\n"
+                  f"6. The VERY LAST character of your response MUST be the "
+                  f"last character of the translated text itself.\n\n"
                   + _llm_extras(cfg))
 
         cmd = [
@@ -631,7 +704,7 @@ class ClaudeTranslator:
                 if _CLAUDE_QUOTA_PATTERNS.search(err):
                     raise _RateLimited(f"Claude CLI 한도: {err[:200]}")
                 raise TranslationError(f"Claude CLI 오류: {err[:400]}")
-            return (result.stdout or "").strip()
+            return _strip_llm_preamble(result.stdout or "")
 
         tokens = _claude_tokens_of(cfg)
         if not tokens:
