@@ -8,7 +8,9 @@
 ; ============================================================
 
 #define MyAppName     "Joy4_Novel"
-#define MyAppVersion  "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
 #define MyAppExeName  "Joy4_Novel.exe"
 #define MyAppPublisher "Joy4_Novel"
 

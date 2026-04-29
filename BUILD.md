@@ -48,7 +48,31 @@ API 키, 프롬프트/사전, 로그 모두 이 폴더에 저장됩니다.
 2. `Joy4_Novel.spec` 의 `icon=None` 을 `icon="icon.ico"` 로 변경
 3. `build.bat` 재실행
 
-## 5. 트러블슈팅
+## 5. GitHub Releases 자동 배포
+
+빌드 환경이 없어도 태그만 푸시하면 GitHub Actions가 Windows에서 빌드해
+포터블 zip + 인스톨러 exe를 Release에 첨부합니다.
+
+### 새 버전 릴리스
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+→ Actions 탭에서 진행상황 확인 → 완료 시 Releases 페이지에 두 파일 게시:
+- `Joy4_Novel_1.0.0_portable.zip` — 압축 풀고 `Joy4_Novel.exe` 실행
+- `Joy4_Novel_Setup_1.0.0.exe` — 정식 인스톨러
+
+### 빌드만 테스트 (릴리스 안 만듦)
+Actions 탭 → "Release" 워크플로우 → "Run workflow" → 임의 버전 입력.
+완료 후 Artifacts에서 결과물 다운로드 가능.
+
+### 사용자 다운로드 안내
+배포 시 사용자에게 다음 URL 안내:
+```
+https://github.com/Joy4orce/joy4-novel/releases/latest
+```
+
+## 6. 트러블슈팅
 
 - **"Failed to execute script"**: `dist\Joy4_Novel\Joy4_Novel.exe` 를 콘솔에서 실행해 에러 확인.
   임시 콘솔 로그가 필요하면 `Joy4_Novel.spec` 의 `console=False` → `True` 로 변경 후 재빌드.
