@@ -454,13 +454,23 @@ class GeminiTranslator:
 # Claude CLI (구독 사용)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Windows에서 windowed 부모(pythonw / PyInstaller --noconsole 빌드)가
+# 콘솔 자식 프로세스(claude.exe)를 spawn할 때 콘솔창이 깜빡 뜨는 것을 막음.
+# 다른 OS에서는 무시됨.
+if sys.platform == "win32":
+    _NO_WINDOW_KW = {"creationflags": subprocess.CREATE_NO_WINDOW}
+else:
+    _NO_WINDOW_KW = {}
+
+
 def _can_execute(path: str) -> bool:
     """파일을 실제로 실행해 보고 동작하면 True. os.path.isfile 우회용
     (일부 Windows 환경에서 stat은 실패해도 CreateProcess는 성공함)."""
     if not path:
         return False
     try:
-        r = subprocess.run([path, "--version"], capture_output=True, timeout=15)
+        r = subprocess.run([path, "--version"], capture_output=True, timeout=15,
+                           **_NO_WINDOW_KW)
         return r.returncode == 0
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return False
@@ -543,10 +553,23 @@ class ClaudeTranslator:
 
     def __init__(self):
         self._rot = _KeyRotator()
+        # 매 청크마다 _find_claude_cli 가 --version 실행해서 콘솔창 띄우는 것 방지.
+        # (override, 검증된 경로) 형태로 캐시.
+        self._path_cache = ("", "")
+
+    def _resolve_path(self, override: str) -> str:
+        cached_override, cached_path = self._path_cache
+        # 같은 override 로 이미 검증된 경로가 있고 파일이 그대로면 재사용.
+        # (os.path.isfile 만으로 빠르게 sanity check — subprocess 안 띄움)
+        if cached_path and cached_override == override and os.path.isfile(cached_path):
+            return cached_path
+        path = _find_claude_cli(override)
+        self._path_cache = (override, path)
+        return path
 
     def translate(self, text, source_lang_name, target_lang_name, cfg):
         override = (cfg.get("path") or "").strip()
-        path = _find_claude_cli(override)
+        path = self._resolve_path(override)
         if not path:
             raise TranslationError(
                 "claude CLI를 찾을 수 없습니다.\n"
@@ -591,6 +614,7 @@ class ClaudeTranslator:
                     errors="replace",
                     timeout=300,
                     env=env,
+                    **_NO_WINDOW_KW,
                 )
             except subprocess.TimeoutExpired:
                 raise TranslationError("Claude CLI 응답 시간 초과 (5분)")
