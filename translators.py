@@ -74,23 +74,71 @@ _TRANSIENT_EXCS = (
     requests.exceptions.ChunkedEncodingError,
 )
 
+# 일시적 서버 과부하/장애로 간주해 재시도할 HTTP 상태코드.
+# 503: 모델 과부하 (Gemini 등에서 자주 발생), 502/504: 게이트웨이, 500: 일반 서버 오류.
+_RETRY_STATUS = frozenset({500, 502, 503, 504})
 
-def _post_with_retry(url, *, max_retries=3, backoff=1.5, **kwargs):
-    """requests.post 의 일시적 실패(타임아웃/연결끊김)를 자동 재시도.
-    HTTP 에러 응답(4xx/5xx)은 그대로 반환 — 호출자가 처리."""
+
+def _parse_retry_after(value: str) -> float:
+    """Retry-After 헤더 파싱 — 초(int) 또는 HTTP-date. 실패 시 0."""
+    if not value:
+        return 0.0
+    value = value.strip()
+    # delta-seconds 형태
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    # HTTP-date 형태
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(value)
+        if dt is None:
+            return 0.0
+        import datetime as _dt
+        now = _dt.datetime.now(dt.tzinfo) if dt.tzinfo else _dt.datetime.utcnow()
+        return max(0.0, (dt - now).total_seconds())
+    except Exception:
+        return 0.0
+
+
+def _post_with_retry(url, *, max_retries=4, backoff=2.0, max_delay=30.0, **kwargs):
+    """requests.post 의 일시적 실패를 자동 재시도.
+
+    재시도 대상:
+      - 네트워크 예외 (타임아웃/연결끊김)
+      - HTTP 5xx 중 일시적 장애 코드 (500/502/503/504)
+        → Retry-After 헤더가 있으면 그만큼 대기, 없으면 지수 백오프 + 지터.
+
+    영구적 4xx (인증/한도/요청오류 등) 응답은 즉시 반환 — 호출자가 처리."""
+    import random
     last_err = None
-    delay = 1.0
+    last_resp = None
+    delay = 1.5
     for attempt in range(max_retries + 1):
         try:
-            return requests.post(url, **kwargs)
+            resp = requests.post(url, **kwargs)
         except _TRANSIENT_EXCS as e:
             last_err = e
+            last_resp = None
             if attempt < max_retries:
-                time.sleep(delay)
-                delay = min(delay * backoff, 10.0)
-            else:
-                raise
-    # 도달 불가
+                time.sleep(delay + random.uniform(0, delay * 0.25))
+                delay = min(delay * backoff, max_delay)
+                continue
+            raise
+        # 일시적 5xx → 재시도
+        if resp.status_code in _RETRY_STATUS and attempt < max_retries:
+            last_resp = resp
+            wait = _parse_retry_after(resp.headers.get("Retry-After", ""))
+            if wait <= 0:
+                wait = delay + random.uniform(0, delay * 0.25)
+            time.sleep(min(wait, max_delay))
+            delay = min(delay * backoff, max_delay)
+            continue
+        return resp
+    # 모든 재시도 실패 — 마지막 응답이라도 있으면 반환 (호출자가 5xx 메시지를 보여줄 수 있게)
+    if last_resp is not None:
+        return last_resp
     raise last_err  # type: ignore[misc]
 
 
@@ -496,6 +544,16 @@ class GeminiTranslator:
             )
             _maybe_rate_limited(resp, "Gemini")
             if resp.status_code != 200:
+                # 503/500/502/504 — _post_with_retry가 이미 백오프하며 재시도했지만 끝까지 실패한 경우
+                if resp.status_code in _RETRY_STATUS:
+                    raise TranslationError(
+                        f"Gemini 서버 과부하 {resp.status_code} (재시도 모두 실패).\n"
+                        f"Google 측 일시적 장애입니다. 다음 중 하나를 시도해보세요:\n"
+                        f"  • 잠시 후(2~5분) 다시 시작 — 보통 곧 회복됨\n"
+                        f"  • 다른 모델로 변경: gemini-2.0-flash, gemini-1.5-flash\n"
+                        f"  • 다른 번역기(Claude / DeepL 등)로 전환\n"
+                        f"원본 응답: {resp.text[:200]}"
+                    )
                 raise TranslationError(f"Gemini 오류 {resp.status_code}: {resp.text[:300]}")
             data = resp.json()
 
