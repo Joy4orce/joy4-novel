@@ -51,6 +51,17 @@ DEFAULT_CONFIG = {
             "model": "haiku",    # haiku / sonnet / opus 또는 전체 모델 ID
             "oauth_tokens": [],  # `claude setup-token` 으로 발급한 장기 토큰. 비우면 시스템 로그인 사용
         },
+        "local": {
+            # OpenAI 호환 엔드포인트 — koboldcpp / LM Studio / Ollama / 자체 서버
+            "base_url": "http://localhost:5001/v1",
+            "api_key":  "sk-local",        # 더미. 일부 클라이언트가 요구해서 유지
+            "model":    "local",           # koboldcpp는 모델명 무시. 다른 백엔드 호환용
+            "system_prompt": "당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요.",
+            "temperature":   0.1,
+            "repeat_penalty": 1.05,
+            "max_chars":     4000,
+            "timeout":       180,
+        },
         "pixiv": {
             "session_id": "",
         },

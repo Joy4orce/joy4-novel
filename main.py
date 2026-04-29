@@ -1,6 +1,6 @@
 """
 Joy4_Novel - 다중 AI API 번역기
-지원: ChatGPT, Naver Papago, Google Translate, DeepL, Google Gemini, Claude
+지원: ChatGPT, Naver Papago, Google Translate, DeepL, Google Gemini, Claude, Local LLM
 """
 
 import os
@@ -8,6 +8,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
+
+import requests
 
 import config as cfg_module
 from translators import TRANSLATORS, LANG_CODES, TranslationError, MAX_CHARS, chunk_text
@@ -55,6 +57,7 @@ API_LIST = [
     ("deepl",    "DeepL"),
     ("gemini",   "Google Gemini"),
     ("claude",   "Claude (CLI / 구독)"),
+    ("local",    "Local LLM"),
 ]
 API_ID_BY_DISPLAY = {v: k for k, v in API_LIST}
 API_DISPLAY_BY_ID = {k: v for k, v in API_LIST}
@@ -91,7 +94,7 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
 
         self.title("API 설정")
-        self.geometry("640x460")
+        self.geometry("640x560")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.grab_set()
@@ -108,7 +111,7 @@ class SettingsDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"640x460+{x}+{y}")
+        self.geometry(f"640x560+{x}+{y}")
 
     # ── UI 구성 ──────────────────────────────────────────────────────────────
 
@@ -144,6 +147,7 @@ class SettingsDialog(tk.Toplevel):
         self._panels["deepl"]    = self._make_panel_deepl()
         self._panels["gemini"]   = self._make_panel_gemini()
         self._panels["claude"]   = self._make_panel_claude()
+        self._panels["local"]    = self._make_panel_local()
         self._panels["pixiv"]    = self._make_panel_pixiv()
 
         # 하단 버튼
@@ -288,6 +292,97 @@ class SettingsDialog(tk.Toplevel):
                    "모델은 별칭(haiku 등) 또는 전체 ID(claude-haiku-4-5) 사용 가능.")
         return f
 
+    def _make_panel_local(self):
+        f = self._make_panel("Local LLM (OpenAI 호환)", "")
+        self._row(f, "Endpoint URL", "local_base_url",
+                  placeholder="예: http://localhost:5001/v1")
+        self._row(f, "API Key", "local_api_key", show="*",
+                  placeholder="더미 OK (예: sk-local)")
+        self._row(f, "Model 이름", "local_model",
+                  placeholder="koboldcpp는 무시 · LM Studio는 모델 ID")
+
+        # Temperature + Repeat Penalty 한 줄로 (좁은 입력칸 2개)
+        row = tk.Frame(f, bg=BG)
+        row.pack(fill="x", pady=5)
+        tk.Label(row, text="Temperature", font=FONT_MAIN, bg=BG, fg=FG2,
+                 width=14, anchor="w").pack(side="left")
+        var_t = tk.StringVar()
+        tk.Entry(row, textvariable=var_t, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        self._vars["local_temperature"] = var_t
+        tk.Label(row, text="    Repeat Penalty", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left", padx=(20, 6))
+        var_r = tk.StringVar()
+        tk.Entry(row, textvariable=var_r, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        self._vars["local_repeat_penalty"] = var_r
+
+        # System Prompt (멀티라인)
+        tk.Label(f, text="System Prompt", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(fill="x", pady=(10, 3))
+        sp = tk.Text(f, font=FONT_MAIN, bg=BG3, fg=FG, insertbackground=FG,
+                     relief="flat", bd=6, height=5, wrap="word", undo=True)
+        sp.pack(fill="x")
+        self._vars["local_system_prompt"] = sp
+
+        # 연결 테스트 버튼 + 상태 라벨
+        test_row = tk.Frame(f, bg=BG)
+        test_row.pack(fill="x", pady=(10, 0))
+        tk.Button(test_row, text="연결 테스트", font=FONT_MAIN,
+                  bg=BG3, fg=FG, relief="flat", padx=14, pady=4,
+                  cursor="hand2", command=self._test_local_connection
+                  ).pack(side="left")
+        self._local_test_label = tk.Label(test_row, text="", font=("Malgun Gothic", 9),
+                                          bg=BG, fg=FG2, anchor="w")
+        self._local_test_label.pack(side="left", padx=(10, 0))
+
+        self._hint(f,
+                   "koboldcpp / LM Studio / Ollama / 자체 OpenAI 호환 서버 모두 지원.\n"
+                   "ja-ko-vn-12b-v2 모델은 일→한 단방향 — 다른 언어쌍은 시스템 프롬프트 조정 필요.")
+        return f
+
+    def _test_local_connection(self):
+        """현재 입력된 endpoint/api_key로 /v1/models 호출해 응답 확인."""
+        base_url = self._vars["local_base_url"].get().strip().rstrip("/")
+        api_key  = self._vars["local_api_key"].get().strip()
+        if not base_url:
+            self._local_test_label.configure(
+                text="Endpoint URL이 비어있습니다.", fg="#ff8888")
+            return
+        self._local_test_label.configure(text="연결 중...", fg=FG2)
+
+        def worker():
+            try:
+                headers = {}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                r = requests.get(f"{base_url}/models", headers=headers, timeout=5)
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        n = len(data.get("data", []))
+                        msg = f"✓ 연결 성공 (모델 {n}개 응답)"
+                    except Exception:
+                        msg = "✓ 연결 성공 (응답 200, 파싱 불가)"
+                    color = "#88ff88"
+                else:
+                    msg = f"✗ HTTP {r.status_code}: {r.text[:80]}"
+                    color = "#ff8888"
+            except requests.exceptions.ConnectionError:
+                msg = "✗ 서버 응답 없음 (실행 중인지 확인)"
+                color = "#ff8888"
+            except requests.exceptions.Timeout:
+                msg = "✗ 응답 시간 초과 (5초)"
+                color = "#ff8888"
+            except Exception as e:
+                msg = f"✗ {type(e).__name__}: {str(e)[:80]}"
+                color = "#ff8888"
+            self.after(0, lambda: self._local_test_label.configure(text=msg, fg=color))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _make_panel_pixiv(self):
         f = self._make_panel("Pixiv (크롤러 로그인)", "")
         self._row(f, "Session ID", "pixiv_session_id", show="*",
@@ -320,6 +415,17 @@ class SettingsDialog(tk.Toplevel):
         self._vars["claude_model"].set(a.get("claude", {}).get("model", "haiku"))
         self._set_val("claude_oauth_tokens", a.get("claude", {}).get("oauth_tokens", []))
 
+        loc = a.get("local", {})
+        self._vars["local_base_url"].set(loc.get("base_url", "http://localhost:5001/v1"))
+        self._vars["local_api_key"].set(loc.get("api_key", "sk-local"))
+        self._vars["local_model"].set(loc.get("model", "local"))
+        self._vars["local_temperature"].set(str(loc.get("temperature", 0.1)))
+        self._vars["local_repeat_penalty"].set(str(loc.get("repeat_penalty", 1.05)))
+        self._set_val("local_system_prompt", loc.get(
+            "system_prompt",
+            "당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요."
+        ))
+
         self._vars["pixiv_session_id"].set(a.get("pixiv", {}).get("session_id", ""))
 
     def _save(self):
@@ -348,6 +454,26 @@ class SettingsDialog(tk.Toplevel):
         a["claude"]["path"]  = self._vars["claude_path"].get().strip()
         a["claude"]["model"] = self._vars["claude_model"].get().strip() or "haiku"
         a["claude"]["oauth_tokens"] = self._parse_keys("claude_oauth_tokens")
+
+        a.setdefault("local", {})
+        a["local"]["base_url"] = (self._vars["local_base_url"].get().strip()
+                                  or "http://localhost:5001/v1")
+        a["local"]["api_key"]  = self._vars["local_api_key"].get().strip()
+        a["local"]["model"]    = self._vars["local_model"].get().strip() or "local"
+        try:
+            a["local"]["temperature"] = float(
+                self._vars["local_temperature"].get().strip() or "0.1")
+        except ValueError:
+            a["local"]["temperature"] = 0.1
+        try:
+            a["local"]["repeat_penalty"] = float(
+                self._vars["local_repeat_penalty"].get().strip() or "1.05")
+        except ValueError:
+            a["local"]["repeat_penalty"] = 1.05
+        a["local"]["system_prompt"] = self._get_val("local_system_prompt").strip()
+        # max_chars / timeout 은 설정 파일에서 직접 편집 (UI 노출 X)
+        a["local"].setdefault("max_chars", 4000)
+        a["local"].setdefault("timeout", 180)
 
         a.setdefault("pixiv", {})["session_id"] = self._vars["pixiv_session_id"].get().strip()
 

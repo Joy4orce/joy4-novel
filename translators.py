@@ -253,6 +253,7 @@ MAX_CHARS = {
     "deepl":    4000,
     "gemini":   6000,
     "claude":   6000,
+    "local":    4000,   # 4K 컨텍스트 가정 (사용자 조정 가능)
 }
 
 
@@ -330,6 +331,9 @@ LANG_CODES = {
                  "중국어(간체)": "Simplified Chinese", "중국어(번체)": "Traditional Chinese",
                  "프랑스어": "French", "독일어": "German", "스페인어": "Spanish", "러시아어": "Russian"},
     "claude":   {"자동감지": None, "한국어": "Korean", "영어": "English", "일본어": "Japanese",
+                 "중국어(간체)": "Simplified Chinese", "중국어(번체)": "Traditional Chinese",
+                 "프랑스어": "French", "독일어": "German", "스페인어": "Spanish", "러시아어": "Russian"},
+    "local":    {"자동감지": None, "한국어": "Korean", "영어": "English", "일본어": "Japanese",
                  "중국어(간체)": "Simplified Chinese", "중국어(번체)": "Traditional Chinese",
                  "프랑스어": "French", "독일어": "German", "스페인어": "Spanish", "러시아어": "Russian"},
 }
@@ -772,6 +776,95 @@ class ClaudeTranslator:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Local LLM (OpenAI 호환 엔드포인트 — koboldcpp / LM Studio / Ollama / 자체 서버)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_LOCAL_DEFAULT_SYSTEM = (
+    "당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요."
+)
+
+
+class LocalLLMTranslator:
+    """OpenAI 호환 /v1/chat/completions 엔드포인트로 호출.
+    특정 모델·백엔드에 묶이지 않고 base_url / model / system_prompt 모두
+    사용자가 설정 가능. 키 로테이션 없음 (단일 엔드포인트)."""
+
+    name = "Local LLM"
+
+    def translate(self, text, source_lang_name, target_lang_name, cfg):
+        base_url = (cfg.get("base_url") or "http://localhost:5001/v1").strip().rstrip("/")
+        api_key  = (cfg.get("api_key") or "").strip()
+        model    = (cfg.get("model") or "local").strip() or "local"
+        try:
+            temperature = float(cfg.get("temperature", 0.1))
+        except (TypeError, ValueError):
+            temperature = 0.1
+        try:
+            repeat_penalty = float(cfg.get("repeat_penalty", 1.05))
+        except (TypeError, ValueError):
+            repeat_penalty = 1.05
+        try:
+            timeout = int(cfg.get("timeout", 180))
+        except (TypeError, ValueError):
+            timeout = 180
+
+        # 시스템 프롬프트: cfg 우선, 없으면 기본값. 사용자 사전/추가 지시는 뒤에 합침.
+        system_base = (cfg.get("system_prompt") or "").strip() or _LOCAL_DEFAULT_SYSTEM
+        extras = _llm_extras(cfg)
+        system = (system_base + "\n\n" + extras).strip() if extras else system_base
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": text},
+            ],
+            "temperature": temperature,
+            # OpenAI 표준엔 없는 필드 — koboldcpp / LM Studio 등이 인식.
+            # 미지원 서버는 무시함 (호환성 OK).
+            "repeat_penalty": repeat_penalty,
+        }
+
+        try:
+            resp = _post_with_retry(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=timeout,
+            )
+        except requests.exceptions.ConnectionError:
+            raise TranslationError(
+                f"Local LLM 서버에 연결할 수 없습니다.\n"
+                f"  • Endpoint: {base_url}\n"
+                f"  • F:\\Joy4_LLM\\scripts\\start_kobold.bat 을 실행했는지 확인하세요.\n"
+                f"  • 또는 LM Studio / Ollama 등 OpenAI 호환 서버가 실행 중인지 확인하세요."
+            )
+        except requests.exceptions.Timeout:
+            raise TranslationError(
+                f"Local LLM 응답 시간 초과 ({timeout}s).\n"
+                f"  • 모델 로딩 중이거나 청크가 너무 클 수 있습니다.\n"
+                f"  • 설정에서 max_chars 를 줄이거나 timeout 을 늘리세요."
+            )
+
+        if resp.status_code != 200:
+            raise TranslationError(
+                f"Local LLM 오류 {resp.status_code}: {resp.text[:300]}"
+            )
+        try:
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, ValueError, TypeError) as e:
+            raise TranslationError(
+                f"Local LLM 응답 형식 오류 ({type(e).__name__}): {resp.text[:300]}"
+            )
+        return _strip_llm_preamble(content or "")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Registry
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -782,4 +875,5 @@ TRANSLATORS = {
     "deepl":    DeepLTranslator(),
     "gemini":   GeminiTranslator(),
     "claude":   ClaudeTranslator(),
+    "local":    LocalLLMTranslator(),
 }
