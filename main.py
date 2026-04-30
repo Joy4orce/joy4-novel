@@ -340,7 +340,7 @@ class SettingsDialog(tk.Toplevel):
 
         self._hint(f,
                    "koboldcpp / LM Studio / Ollama / 자체 OpenAI 호환 서버 모두 지원.\n"
-                   "ja-ko-vn-12b-v2 모델은 일→한 단방향 — 다른 언어쌍은 시스템 프롬프트 조정 필요.")
+                   "현재 기본 모델: Gemma-4-E4B-Uncensored (범용). 다른 모델로 교체 시 시스템 프롬프트도 함께 조정하세요.")
         return f
 
     def _test_local_connection(self):
@@ -416,15 +416,19 @@ class SettingsDialog(tk.Toplevel):
         self._set_val("claude_oauth_tokens", a.get("claude", {}).get("oauth_tokens", []))
 
         loc = a.get("local", {})
-        self._vars["local_base_url"].set(loc.get("base_url", "http://localhost:5001/v1"))
-        self._vars["local_api_key"].set(loc.get("api_key", "sk-local"))
-        self._vars["local_model"].set(loc.get("model", "local"))
-        self._vars["local_temperature"].set(str(loc.get("temperature", 0.1)))
-        self._vars["local_repeat_penalty"].set(str(loc.get("repeat_penalty", 1.05)))
-        self._set_val("local_system_prompt", loc.get(
-            "system_prompt",
-            "당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요."
-        ))
+        local_defaults = cfg_module.DEFAULT_CONFIG["apis"]["local"]
+        self._vars["local_base_url"].set(
+            loc.get("base_url", local_defaults["base_url"]))
+        self._vars["local_api_key"].set(
+            loc.get("api_key",  local_defaults["api_key"]))
+        self._vars["local_model"].set(
+            loc.get("model",    local_defaults["model"]))
+        self._vars["local_temperature"].set(
+            str(loc.get("temperature", local_defaults["temperature"])))
+        self._vars["local_repeat_penalty"].set(
+            str(loc.get("repeat_penalty", local_defaults["repeat_penalty"])))
+        self._set_val("local_system_prompt",
+            loc.get("system_prompt", local_defaults["system_prompt"]))
 
         self._vars["pixiv_session_id"].set(a.get("pixiv", {}).get("session_id", ""))
 
@@ -456,10 +460,12 @@ class SettingsDialog(tk.Toplevel):
         a["claude"]["oauth_tokens"] = self._parse_keys("claude_oauth_tokens")
 
         a.setdefault("local", {})
+        local_defaults = cfg_module.DEFAULT_CONFIG["apis"]["local"]
         a["local"]["base_url"] = (self._vars["local_base_url"].get().strip()
-                                  or "http://localhost:5001/v1")
+                                  or local_defaults["base_url"])
         a["local"]["api_key"]  = self._vars["local_api_key"].get().strip()
-        a["local"]["model"]    = self._vars["local_model"].get().strip() or "local"
+        a["local"]["model"]    = (self._vars["local_model"].get().strip()
+                                  or local_defaults["model"])
         try:
             a["local"]["temperature"] = float(
                 self._vars["local_temperature"].get().strip() or "0.1")

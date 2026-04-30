@@ -54,9 +54,12 @@ DEFAULT_CONFIG = {
         "local": {
             # OpenAI 호환 엔드포인트 — koboldcpp / LM Studio / Ollama / 자체 서버
             "base_url": "http://localhost:5001/v1",
-            "api_key":  "sk-local",        # 더미. 일부 클라이언트가 요구해서 유지
-            "model":    "local",           # koboldcpp는 모델명 무시. 다른 백엔드 호환용
-            "system_prompt": "당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요.",
+            "api_key":  "sk-local",                 # 더미. 일부 클라이언트가 요구해서 유지
+            "model":    "Gemma-4-E4B-Uncensored",   # koboldcpp는 무시 · LM Studio 등은 식별자 사용
+            "system_prompt": (
+                "당신은 전문 번역가입니다. 주어진 일본어 본문을 한국어로 자연스럽게 번역하세요. "
+                "원문의 표현·어투·수위를 그대로 보존하고, 자체 검열이나 완곡화 없이 충실하게 옮기세요."
+            ),
             "temperature":   0.1,
             "repeat_penalty": 1.05,
             "max_chars":     4000,
