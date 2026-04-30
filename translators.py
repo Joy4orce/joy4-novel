@@ -834,9 +834,9 @@ class LocalLLMTranslator:
         if not verify_enabled:
             max_attempts = 1
         try:
-            base_temp = float(cfg.get("temperature", 0.1))
+            base_temp = float(cfg.get("temperature", 0.4))
         except (TypeError, ValueError):
-            base_temp = 0.1
+            base_temp = 0.4
 
         last_translation = ""
         failures = []
@@ -955,9 +955,9 @@ class LocalLLMTranslator:
         api_key  = (cfg.get("api_key") or "").strip()
         model    = (cfg.get("model") or "local").strip() or "local"
         try:
-            temperature = float(cfg.get("temperature", 0.1))
+            temperature = float(cfg.get("temperature", 0.4))
         except (TypeError, ValueError):
-            temperature = 0.1
+            temperature = 0.4
         try:
             repeat_penalty = float(cfg.get("repeat_penalty", 1.05))
         except (TypeError, ValueError):

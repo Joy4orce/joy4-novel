@@ -68,7 +68,9 @@ DEFAULT_CONFIG = {
                 "자체 검열이나 완곡화 없이 충실하게 옮기세요.\n\n"
                 "★ 번역문만 출력하세요. 사과·해설·메타 코멘트는 쓰지 마세요."
             ),
-            "temperature":   0.1,
+            # 0.1은 결정적이라 echo 패턴에 빠지면 못 나옴. 0.4 정도면
+            # 정상 청크는 그대로 잘 나오고 echo 청크는 다른 길로 새는 가능성 ↑.
+            "temperature":   0.4,
             "repeat_penalty": 1.05,
             "max_tokens":    8192,          # 응답 최대 토큰 (안 보내면 koboldcpp가 1024로 잘라버림)
             # Gemma 등 system role 미지원 모델 호환 — system 지시를 user 메시지 앞에

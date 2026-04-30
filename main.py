@@ -520,14 +520,16 @@ class SettingsDialog(tk.Toplevel):
                                   or local_defaults["model"])
         try:
             a["local"]["temperature"] = float(
-                self._vars["local_temperature"].get().strip() or "0.1")
+                self._vars["local_temperature"].get().strip()
+                or str(local_defaults["temperature"]))
         except ValueError:
-            a["local"]["temperature"] = 0.1
+            a["local"]["temperature"] = local_defaults["temperature"]
         try:
             a["local"]["repeat_penalty"] = float(
-                self._vars["local_repeat_penalty"].get().strip() or "1.05")
+                self._vars["local_repeat_penalty"].get().strip()
+                or str(local_defaults["repeat_penalty"]))
         except ValueError:
-            a["local"]["repeat_penalty"] = 1.05
+            a["local"]["repeat_penalty"] = local_defaults["repeat_penalty"]
         try:
             a["local"]["max_tokens"] = int(
                 self._vars["local_max_tokens"].get().strip()
