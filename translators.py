@@ -807,6 +807,10 @@ class LocalLLMTranslator:
         except (TypeError, ValueError):
             repeat_penalty = 1.05
         try:
+            max_tokens = int(cfg.get("max_tokens", 8192))
+        except (TypeError, ValueError):
+            max_tokens = 8192
+        try:
             timeout = int(cfg.get("timeout", 180))
         except (TypeError, ValueError):
             timeout = 180
@@ -827,6 +831,10 @@ class LocalLLMTranslator:
                 {"role": "user",   "content": text},
             ],
             "temperature": temperature,
+            # 응답 길이 한도. 안 보내면 koboldcpp 등이 자체 기본값(보통 1024)으로
+            # 잘라서 번역이 중간에 끊김. 4000자 입력은 KO 출력이 ~3500 토큰까지
+            # 갈 수 있어 8192 정도로 넉넉하게 둠.
+            "max_tokens": max_tokens,
             # OpenAI 표준엔 없는 필드 — koboldcpp / LM Studio 등이 인식.
             # 미지원 서버는 무시함 (호환성 OK).
             "repeat_penalty": repeat_penalty,

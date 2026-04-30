@@ -94,7 +94,7 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
 
         self.title("API 설정")
-        self.geometry("640x560")
+        self.geometry("640x600")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.grab_set()
@@ -111,7 +111,7 @@ class SettingsDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"640x560+{x}+{y}")
+        self.geometry(f"640x600+{x}+{y}")
 
     # ── UI 구성 ──────────────────────────────────────────────────────────────
 
@@ -319,6 +319,20 @@ class SettingsDialog(tk.Toplevel):
                  ).pack(side="left")
         self._vars["local_repeat_penalty"] = var_r
 
+        # Max Tokens — 응답 길이 한도 (안 보내면 koboldcpp가 1024로 잘라버림)
+        row2 = tk.Frame(f, bg=BG)
+        row2.pack(fill="x", pady=5)
+        tk.Label(row2, text="Max Tokens", font=FONT_MAIN, bg=BG, fg=FG2,
+                 width=14, anchor="w").pack(side="left")
+        var_mt = tk.StringVar()
+        tk.Entry(row2, textvariable=var_mt, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        tk.Label(row2, text="  응답 최대 토큰 (기본 8192) · 짧으면 번역이 중간에 잘림",
+                 font=("Malgun Gothic", 8), bg=BG, fg=FG2, anchor="w"
+                 ).pack(side="left", padx=(8, 0))
+        self._vars["local_max_tokens"] = var_mt
+
         # System Prompt (멀티라인)
         tk.Label(f, text="System Prompt", font=FONT_MAIN, bg=BG, fg=FG2,
                  anchor="w").pack(fill="x", pady=(10, 3))
@@ -427,6 +441,8 @@ class SettingsDialog(tk.Toplevel):
             str(loc.get("temperature", local_defaults["temperature"])))
         self._vars["local_repeat_penalty"].set(
             str(loc.get("repeat_penalty", local_defaults["repeat_penalty"])))
+        self._vars["local_max_tokens"].set(
+            str(loc.get("max_tokens", local_defaults["max_tokens"])))
         self._set_val("local_system_prompt",
             loc.get("system_prompt", local_defaults["system_prompt"]))
 
@@ -476,6 +492,12 @@ class SettingsDialog(tk.Toplevel):
                 self._vars["local_repeat_penalty"].get().strip() or "1.05")
         except ValueError:
             a["local"]["repeat_penalty"] = 1.05
+        try:
+            a["local"]["max_tokens"] = int(
+                self._vars["local_max_tokens"].get().strip()
+                or str(local_defaults["max_tokens"]))
+        except ValueError:
+            a["local"]["max_tokens"] = local_defaults["max_tokens"]
         a["local"]["system_prompt"] = self._get_val("local_system_prompt").strip()
         # max_chars / timeout 은 설정 파일에서 직접 편집 (UI 노출 X)
         a["local"].setdefault("max_chars", 4000)
@@ -499,7 +521,7 @@ class PromptDialog(tk.Toplevel):
         self.result = None
 
         self.title("번역 프롬프트 · 사용자 사전")
-        self.geometry("640x560")
+        self.geometry("640x600")
         self.configure(bg=BG)
         self.grab_set()
 

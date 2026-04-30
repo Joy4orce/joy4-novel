@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
             ),
             "temperature":   0.1,
             "repeat_penalty": 1.05,
+            "max_tokens":    8192,          # 응답 최대 토큰 (안 보내면 koboldcpp가 1024로 잘라버림)
             "max_chars":     4000,
             "timeout":       180,
         },
