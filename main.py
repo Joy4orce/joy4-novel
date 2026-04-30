@@ -94,7 +94,7 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
 
         self.title("API 설정")
-        self.geometry("640x600")
+        self.geometry("640x640")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.grab_set()
@@ -111,7 +111,7 @@ class SettingsDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"640x600+{x}+{y}")
+        self.geometry(f"640x640+{x}+{y}")
 
     # ── UI 구성 ──────────────────────────────────────────────────────────────
 
@@ -333,6 +333,26 @@ class SettingsDialog(tk.Toplevel):
                  ).pack(side="left", padx=(8, 0))
         self._vars["local_max_tokens"] = var_mt
 
+        # 검수 (Verify) — 동일 모델로 번역 검수, 실패 시 재시도
+        row3 = tk.Frame(f, bg=BG)
+        row3.pack(fill="x", pady=5)
+        var_v = tk.BooleanVar()
+        tk.Checkbutton(row3, text="검수 활성화 (실패 시 재번역)", variable=var_v,
+                       font=FONT_MAIN, bg=BG, fg=FG, selectcolor=BG3,
+                       activebackground=BG, activeforeground=FG,
+                       relief="flat", cursor="hand2"
+                       ).pack(side="left")
+        self._vars["local_verify_enabled"] = var_v
+        tk.Label(row3, text="  ·  최대 시도", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left", padx=(20, 6))
+        var_va = tk.StringVar()
+        tk.Entry(row3, textvariable=var_va, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=4
+                 ).pack(side="left")
+        tk.Label(row3, text="회", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left", padx=(4, 0))
+        self._vars["local_verify_max_attempts"] = var_va
+
         # System Prompt (멀티라인)
         tk.Label(f, text="System Prompt", font=FONT_MAIN, bg=BG, fg=FG2,
                  anchor="w").pack(fill="x", pady=(10, 3))
@@ -354,7 +374,7 @@ class SettingsDialog(tk.Toplevel):
 
         self._hint(f,
                    "koboldcpp / LM Studio / Ollama / 자체 OpenAI 호환 서버 모두 지원.\n"
-                   "현재 기본 모델: Gemma-4-E4B-Uncensored (범용). 다른 모델로 교체 시 시스템 프롬프트도 함께 조정하세요.")
+                   "검수 활성화 시 청크당 ~+25% 시간 소요 · 재시도마다 temperature 점진 상승.")
         return f
 
     def _test_local_connection(self):
@@ -443,6 +463,10 @@ class SettingsDialog(tk.Toplevel):
             str(loc.get("repeat_penalty", local_defaults["repeat_penalty"])))
         self._vars["local_max_tokens"].set(
             str(loc.get("max_tokens", local_defaults["max_tokens"])))
+        self._vars["local_verify_enabled"].set(
+            bool(loc.get("verify_enabled", local_defaults["verify_enabled"])))
+        self._vars["local_verify_max_attempts"].set(
+            str(loc.get("verify_max_attempts", local_defaults["verify_max_attempts"])))
         self._set_val("local_system_prompt",
             loc.get("system_prompt", local_defaults["system_prompt"]))
 
@@ -498,6 +522,13 @@ class SettingsDialog(tk.Toplevel):
                 or str(local_defaults["max_tokens"]))
         except ValueError:
             a["local"]["max_tokens"] = local_defaults["max_tokens"]
+        a["local"]["verify_enabled"] = bool(self._vars["local_verify_enabled"].get())
+        try:
+            a["local"]["verify_max_attempts"] = max(1, int(
+                self._vars["local_verify_max_attempts"].get().strip()
+                or str(local_defaults["verify_max_attempts"])))
+        except ValueError:
+            a["local"]["verify_max_attempts"] = local_defaults["verify_max_attempts"]
         a["local"]["system_prompt"] = self._get_val("local_system_prompt").strip()
         # max_chars / timeout 은 설정 파일에서 직접 편집 (UI 노출 X)
         a["local"].setdefault("max_chars", 4000)
@@ -521,7 +552,7 @@ class PromptDialog(tk.Toplevel):
         self.result = None
 
         self.title("번역 프롬프트 · 사용자 사전")
-        self.geometry("640x600")
+        self.geometry("640x640")
         self.configure(bg=BG)
         self.grab_set()
 

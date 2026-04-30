@@ -787,14 +787,162 @@ _LOCAL_DEFAULT_SYSTEM = (
 )
 
 
+_VERIFY_SYSTEM_PROMPT = (
+    "당신은 번역 품질 검수자입니다. 주어지는 일본어 원문과 한국어 번역을 비교하여 "
+    "다음 조건을 모두 만족하는지 판정합니다.\n\n"
+    "[검수 조건]\n"
+    "1. 원문의 내용이 한국어로 옮겨졌고, 일본어 본문이 그대로 남아있지 않다.\n"
+    "2. 누락된 문장·문단이 없고, 의미가 원문과 일치한다.\n"
+    "3. 사과·거부·검토 메타 텍스트가 포함되지 않은 순수 번역만 있다.\n\n"
+    "[출력 규칙 — 반드시 지키세요]\n"
+    "- 첫 줄에 정확히 \"PASS\" 또는 \"FAIL\" 한 단어만 출력합니다.\n"
+    "- FAIL이면 둘째 줄에 한 문장으로 사유를 적습니다.\n"
+    "- 그 외 어떤 설명·번역·재작성도 출력하지 마세요."
+)
+
+
 class LocalLLMTranslator:
     """OpenAI 호환 /v1/chat/completions 엔드포인트로 호출.
     특정 모델·백엔드에 묶이지 않고 base_url / model / system_prompt 모두
-    사용자가 설정 가능. 키 로테이션 없음 (단일 엔드포인트)."""
+    사용자가 설정 가능. 키 로테이션 없음 (단일 엔드포인트).
+
+    검수가 활성화된 경우 (cfg.verify_enabled=True, 기본값) 번역마다
+    프로그램적 체크 → 동일 모델로 LLM 검수 → PASS면 채택, FAIL이면
+    temperature를 올려가며 재시도. 모두 실패하면 청크를 실패 마킹."""
 
     name = "Local LLM"
 
+    # ── 공개 진입점 ─────────────────────────────────────────────────────────
+
     def translate(self, text, source_lang_name, target_lang_name, cfg):
+        if not text or not text.strip():
+            return text
+
+        verify_enabled = bool(cfg.get("verify_enabled", True))
+        try:
+            max_attempts = int(cfg.get("verify_max_attempts", 3))
+        except (TypeError, ValueError):
+            max_attempts = 3
+        if not verify_enabled:
+            max_attempts = 1
+        try:
+            base_temp = float(cfg.get("temperature", 0.1))
+        except (TypeError, ValueError):
+            base_temp = 0.1
+
+        last_translation = ""
+        failures = []
+
+        for attempt in range(max_attempts):
+            # 시도마다 temperature 점진 상승 — 같은 echo가 반복되는 걸 방지
+            attempt_temp = min(1.0, base_temp + 0.2 * attempt)
+            attempt_cfg = dict(cfg)
+            attempt_cfg["temperature"] = attempt_temp
+
+            translation = self._translate_once(text, attempt_cfg)
+            last_translation = translation
+
+            if not verify_enabled:
+                return translation
+
+            # 단계 1: 프로그램적 체크 (LLM 호출 없이 빠르게)
+            prog_err = self._programmatic_check(text, translation, target_lang_name)
+            if prog_err:
+                failures.append(
+                    f"시도 {attempt + 1}/{max_attempts} (T={attempt_temp:.2f}): "
+                    f"자동검출 — {prog_err}"
+                )
+                continue
+
+            # 단계 2: 동일 모델로 PASS/FAIL 검수
+            try:
+                verdict = self._verify_translation(text, translation, cfg)
+            except TranslationError:
+                # 검수 호출 자체 실패 — 번역 결과는 살리고 통과 처리
+                return translation
+
+            if self._verdict_is_pass(verdict):
+                return translation
+            failures.append(
+                f"시도 {attempt + 1}/{max_attempts} (T={attempt_temp:.2f}): "
+                f"LLM 검수 — {verdict.strip()[:200]}"
+            )
+
+        raise TranslationError(
+            f"Local LLM 검수 {max_attempts}회 모두 실패.\n"
+            + "\n".join(failures)
+            + f"\n\n마지막 번역(앞부분):\n{last_translation[:300]}"
+        )
+
+    # ── 단일 번역/검수 호출 ─────────────────────────────────────────────────
+
+    def _translate_once(self, text: str, cfg: dict) -> str:
+        """번역 1회 시도 — 시스템 프롬프트 구성 + API 호출."""
+        system_base = (cfg.get("system_prompt") or "").strip() or _LOCAL_DEFAULT_SYSTEM
+        extras = _llm_extras(cfg)
+        system = (system_base + "\n\n" + extras).strip() if extras else system_base
+        return self._api_call(cfg, system, text)
+
+    def _verify_translation(self, source: str, translation: str, cfg: dict) -> str:
+        """동일 모델로 검수. 첫 줄 PASS/FAIL 판정 텍스트 반환."""
+        user_content = f"[원문]\n{source}\n\n[번역]\n{translation}"
+        # 검수는 결정적으로 — 낮은 temperature, 짧은 응답
+        verify_cfg = dict(cfg)
+        verify_cfg["temperature"] = 0.1
+        return self._api_call(
+            verify_cfg, _VERIFY_SYSTEM_PROMPT, user_content,
+            override_max_tokens=200,
+        )
+
+    # ── 검수 판정 ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _verdict_is_pass(verdict: str) -> bool:
+        """검수 응답에서 PASS/FAIL 판정. 둘 다 없으면 보수적으로 FAIL."""
+        head = (verdict or "").strip().upper()[:80]
+        if "FAIL" in head:
+            return False
+        if "PASS" in head:
+            return True
+        return False
+
+    @staticmethod
+    def _programmatic_check(source: str, translation: str, target_lang_name) -> str:
+        """LLM 호출 없이 잡을 수 있는 명백한 실패 모드 검출.
+        통과하면 빈 문자열, 실패면 사유 반환."""
+        if not translation or not translation.strip():
+            return "빈 응답"
+        src_norm = source.strip()
+        tgt_norm = translation.strip()
+        # 완전 echo
+        if src_norm == tgt_norm:
+            return "원문 echo (출력 = 입력)"
+        # 부분 echo — 입력 앞 200자가 출력 앞에 그대로 등장
+        head = src_norm[:200]
+        if len(head) >= 50 and tgt_norm.startswith(head):
+            return "원문 echo (입력 앞 200자가 출력 앞에 그대로 등장)"
+        # 일본어 잔존율 (목표가 한국어일 때만 적용)
+        is_korean_target = False
+        if isinstance(target_lang_name, str):
+            tn = target_lang_name.strip().lower()
+            is_korean_target = "한국어" in target_lang_name or tn == "korean"
+        if is_korean_target:
+            ja_chars = sum(
+                1 for c in tgt_norm
+                if ("぀" <= c <= "ゟ") or ("゠" <= c <= "ヿ")
+            )
+            non_space = sum(1 for c in tgt_norm if not c.isspace())
+            if non_space > 0:
+                ratio = ja_chars / non_space
+                if ratio > 0.3:
+                    return f"일본어 문자 잔존율 {ratio:.0%} (>30%)"
+        return ""
+
+    # ── 저수준 API 호출 ────────────────────────────────────────────────────
+
+    def _api_call(self, cfg: dict, system: str, user_text: str,
+                  *, override_max_tokens=None) -> str:
+        """OpenAI 호환 chat/completions 단일 호출. 번역 / 검수 양쪽에서 공용."""
         base_url = (cfg.get("base_url") or "http://localhost:5001/v1").strip().rstrip("/")
         api_key  = (cfg.get("api_key") or "").strip()
         model    = (cfg.get("model") or "local").strip() or "local"
@@ -810,28 +958,24 @@ class LocalLLMTranslator:
             max_tokens = int(cfg.get("max_tokens", 8192))
         except (TypeError, ValueError):
             max_tokens = 8192
+        if override_max_tokens is not None:
+            try:
+                max_tokens = int(override_max_tokens)
+            except (TypeError, ValueError):
+                pass
         try:
             timeout = int(cfg.get("timeout", 180))
         except (TypeError, ValueError):
             timeout = 180
 
-        # 시스템 프롬프트: cfg 우선, 없으면 기본값. 사용자 사전/추가 지시는 뒤에 합침.
-        system_base = (cfg.get("system_prompt") or "").strip() or _LOCAL_DEFAULT_SYSTEM
-        extras = _llm_extras(cfg)
-        system = (system_base + "\n\n" + extras).strip() if extras else system_base
-
-        # Gemma 같은 system role 미지원 모델 호환 — system 지시를 user 앞에 병합.
-        # Gemma 공식 chat template은 user/model 두 turn만 지원하고 system은 버려짐.
-        # 이 옵션이 켜져 있으면 단일 user turn 안에 지시 + 본문을 같이 담아 전송.
+        # Gemma 등 system role 미지원 모델 호환 (자세한 설명은 config.py 참조)
         merge_system = bool(cfg.get("merge_system_into_user", True))
         if merge_system and system:
-            messages = [
-                {"role": "user", "content": f"{system}\n\n{text}"},
-            ]
+            messages = [{"role": "user", "content": f"{system}\n\n{user_text}"}]
         else:
             messages = [
                 {"role": "system", "content": system},
-                {"role": "user",   "content": text},
+                {"role": "user",   "content": user_text},
             ]
 
         headers = {"Content-Type": "application/json"}
@@ -842,12 +986,7 @@ class LocalLLMTranslator:
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            # 응답 길이 한도. 안 보내면 koboldcpp 등이 자체 기본값(보통 1024)으로
-            # 잘라서 번역이 중간에 끊김. 4000자 입력은 KO 출력이 ~3500 토큰까지
-            # 갈 수 있어 8192 정도로 넉넉하게 둠.
             "max_tokens": max_tokens,
-            # OpenAI 표준엔 없는 필드 — koboldcpp / LM Studio 등이 인식.
-            # 미지원 서버는 무시함 (호환성 OK).
             "repeat_penalty": repeat_penalty,
         }
 

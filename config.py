@@ -66,6 +66,9 @@ DEFAULT_CONFIG = {
             # Gemma 등 system role 미지원 모델 호환 — system 지시를 user 메시지 앞에
             # 병합해서 단일 user turn으로 전송. False로 두면 OpenAI 표준대로 분리 전송.
             "merge_system_into_user": True,
+            # 번역 후 동일 모델로 검수, 실패 시 temperature를 올려가며 재시도.
+            "verify_enabled":      True,
+            "verify_max_attempts": 3,
             "max_chars":     4000,
             "timeout":       180,
         },
