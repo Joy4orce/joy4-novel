@@ -820,16 +820,27 @@ class LocalLLMTranslator:
         extras = _llm_extras(cfg)
         system = (system_base + "\n\n" + extras).strip() if extras else system_base
 
+        # Gemma 같은 system role 미지원 모델 호환 — system 지시를 user 앞에 병합.
+        # Gemma 공식 chat template은 user/model 두 turn만 지원하고 system은 버려짐.
+        # 이 옵션이 켜져 있으면 단일 user turn 안에 지시 + 본문을 같이 담아 전송.
+        merge_system = bool(cfg.get("merge_system_into_user", True))
+        if merge_system and system:
+            messages = [
+                {"role": "user", "content": f"{system}\n\n{text}"},
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": text},
+            ]
+
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
         body = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": text},
-            ],
+            "messages": messages,
             "temperature": temperature,
             # 응답 길이 한도. 안 보내면 koboldcpp 등이 자체 기본값(보통 1024)으로
             # 잘라서 번역이 중간에 끊김. 4000자 입력은 KO 출력이 ~3500 토큰까지

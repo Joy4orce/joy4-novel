@@ -63,6 +63,9 @@ DEFAULT_CONFIG = {
             "temperature":   0.1,
             "repeat_penalty": 1.05,
             "max_tokens":    8192,          # 응답 최대 토큰 (안 보내면 koboldcpp가 1024로 잘라버림)
+            # Gemma 등 system role 미지원 모델 호환 — system 지시를 user 메시지 앞에
+            # 병합해서 단일 user turn으로 전송. False로 두면 OpenAI 표준대로 분리 전송.
+            "merge_system_into_user": True,
             "max_chars":     4000,
             "timeout":       180,
         },
