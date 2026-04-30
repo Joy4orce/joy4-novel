@@ -353,9 +353,15 @@ class SettingsDialog(tk.Toplevel):
                  anchor="w").pack(side="left", padx=(4, 0))
         self._vars["local_verify_max_attempts"] = var_va
 
-        # System Prompt (멀티라인)
-        tk.Label(f, text="System Prompt", font=FONT_MAIN, bg=BG, fg=FG2,
-                 anchor="w").pack(fill="x", pady=(10, 3))
+        # System Prompt (멀티라인) — 라벨 + 우측에 "기본값 복원" 버튼
+        sp_head = tk.Frame(f, bg=BG)
+        sp_head.pack(fill="x", pady=(10, 3))
+        tk.Label(sp_head, text="System Prompt", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left")
+        tk.Button(sp_head, text="기본값 복원", font=("Malgun Gothic", 9),
+                  bg=BG3, fg=FG, relief="flat", padx=10, pady=2,
+                  cursor="hand2", command=self._reset_local_system_prompt
+                  ).pack(side="right")
         sp = tk.Text(f, font=FONT_MAIN, bg=BG3, fg=FG, insertbackground=FG,
                      relief="flat", bd=6, height=5, wrap="word", undo=True)
         sp.pack(fill="x")
@@ -376,6 +382,12 @@ class SettingsDialog(tk.Toplevel):
                    "koboldcpp / LM Studio / Ollama / 자체 OpenAI 호환 서버 모두 지원.\n"
                    "검수 활성화 시 청크당 ~+25% 시간 소요 · 재시도마다 temperature 점진 상승.")
         return f
+
+    def _reset_local_system_prompt(self):
+        """System Prompt 텍스트 영역을 DEFAULT_CONFIG의 기본값으로 되돌림.
+        이미 저장된 사용자 커스텀 prompt를 새 기본값으로 갱신하고 싶을 때 사용."""
+        default_prompt = cfg_module.DEFAULT_CONFIG["apis"]["local"]["system_prompt"]
+        self._set_val("local_system_prompt", default_prompt)
 
     def _test_local_connection(self):
         """현재 입력된 endpoint/api_key로 /v1/models 호출해 응답 확인."""
