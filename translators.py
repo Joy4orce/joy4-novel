@@ -972,6 +972,10 @@ class LocalLLMTranslator:
         except (TypeError, ValueError):
             repeat_penalty = 1.1
         try:
+            frequency_penalty = float(cfg.get("frequency_penalty", 0.5))
+        except (TypeError, ValueError):
+            frequency_penalty = 0.5
+        try:
             max_tokens = int(cfg.get("max_tokens", 8192))
         except (TypeError, ValueError):
             max_tokens = 8192
@@ -981,9 +985,9 @@ class LocalLLMTranslator:
             except (TypeError, ValueError):
                 pass
         try:
-            timeout = int(cfg.get("timeout", 180))
+            timeout = int(cfg.get("timeout", 300))
         except (TypeError, ValueError):
-            timeout = 180
+            timeout = 300
 
         # Gemma 등 system role 미지원 모델 호환 (자세한 설명은 config.py 참조)
         merge_system = bool(cfg.get("merge_system_into_user", True))
@@ -1004,6 +1008,10 @@ class LocalLLMTranslator:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            # OpenAI 표준 — 누적 빈도 기반 anti-repetition. runaway 차단.
+            "frequency_penalty": frequency_penalty,
+            # OpenAI 표준엔 없는 필드 — koboldcpp / LM Studio 등이 인식.
+            # 미지원 서버는 무시함 (호환성 OK).
             "repeat_penalty": repeat_penalty,
         }
 

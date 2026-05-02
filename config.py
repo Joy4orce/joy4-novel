@@ -75,6 +75,10 @@ DEFAULT_CONFIG = {
             # 문자 무한 생성하는 runaway 루프에 빠짐. 1.1이면 정상 번역 품질에는
             # 영향 거의 없으면서 반복 lock-in을 막음.
             "repeat_penalty": 1.1,
+            # OpenAI 표준 anti-repetition. repeat_penalty와 메커니즘 다른 보완재 —
+            # 토큰의 누적 등장 빈도에 비례해 페널티 (10번 나오면 11번째 페널티가 더 셈).
+            # 비명 등에서 발생하는 runaway lock-in을 첫 단계에서 막는 효과.
+            "frequency_penalty": 0.5,
             "max_tokens":    8192,          # 응답 최대 토큰 (안 보내면 koboldcpp가 1024로 잘라버림)
             # Gemma 등 system role 미지원 모델 호환 — system 지시를 user 메시지 앞에
             # 병합해서 단일 user turn으로 전송. False로 두면 OpenAI 표준대로 분리 전송.
@@ -83,7 +87,10 @@ DEFAULT_CONFIG = {
             "verify_enabled":      True,
             "verify_max_attempts": 3,
             "max_chars":     4000,
-            "timeout":       180,
+            # 180은 runaway 발생 시 8192 토큰 다 만들기 전에 끊겨서 retry 루프가
+            # 발동 못함. 300이면 220s 정도 걸리는 runaway도 끝까지 받아서
+            # 자동검출 → 다음 시도 (T 상승) 트리거 가능.
+            "timeout":       300,
         },
         "pixiv": {
             "session_id": "",

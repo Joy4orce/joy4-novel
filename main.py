@@ -94,7 +94,7 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
 
         self.title("API 설정")
-        self.geometry("640x640")
+        self.geometry("640x680")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.grab_set()
@@ -111,7 +111,7 @@ class SettingsDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"640x640+{x}+{y}")
+        self.geometry(f"640x680+{x}+{y}")
 
     # ── UI 구성 ──────────────────────────────────────────────────────────────
 
@@ -333,6 +333,20 @@ class SettingsDialog(tk.Toplevel):
                  ).pack(side="left", padx=(8, 0))
         self._vars["local_max_tokens"] = var_mt
 
+        # Frequency Penalty — OpenAI 표준 누적 빈도 페널티 (runaway 차단)
+        row_fp = tk.Frame(f, bg=BG)
+        row_fp.pack(fill="x", pady=5)
+        tk.Label(row_fp, text="Freq Penalty", font=FONT_MAIN, bg=BG, fg=FG2,
+                 width=14, anchor="w").pack(side="left")
+        var_fp = tk.StringVar()
+        tk.Entry(row_fp, textvariable=var_fp, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        tk.Label(row_fp, text="  반복 토큰 누적 페널티 (0~2.0, 기본 0.5) · runaway 방지",
+                 font=("Malgun Gothic", 8), bg=BG, fg=FG2, anchor="w"
+                 ).pack(side="left", padx=(8, 0))
+        self._vars["local_frequency_penalty"] = var_fp
+
         # 검수 (Verify) — 동일 모델로 번역 검수, 실패 시 재시도
         row3 = tk.Frame(f, bg=BG)
         row3.pack(fill="x", pady=5)
@@ -475,6 +489,8 @@ class SettingsDialog(tk.Toplevel):
             str(loc.get("repeat_penalty", local_defaults["repeat_penalty"])))
         self._vars["local_max_tokens"].set(
             str(loc.get("max_tokens", local_defaults["max_tokens"])))
+        self._vars["local_frequency_penalty"].set(
+            str(loc.get("frequency_penalty", local_defaults["frequency_penalty"])))
         self._vars["local_verify_enabled"].set(
             bool(loc.get("verify_enabled", local_defaults["verify_enabled"])))
         self._vars["local_verify_max_attempts"].set(
@@ -536,6 +552,12 @@ class SettingsDialog(tk.Toplevel):
                 or str(local_defaults["max_tokens"]))
         except ValueError:
             a["local"]["max_tokens"] = local_defaults["max_tokens"]
+        try:
+            a["local"]["frequency_penalty"] = float(
+                self._vars["local_frequency_penalty"].get().strip()
+                or str(local_defaults["frequency_penalty"]))
+        except ValueError:
+            a["local"]["frequency_penalty"] = local_defaults["frequency_penalty"]
         a["local"]["verify_enabled"] = bool(self._vars["local_verify_enabled"].get())
         try:
             a["local"]["verify_max_attempts"] = max(1, int(
@@ -566,7 +588,7 @@ class PromptDialog(tk.Toplevel):
         self.result = None
 
         self.title("번역 프롬프트 · 사용자 사전")
-        self.geometry("640x640")
+        self.geometry("640x680")
         self.configure(bg=BG)
         self.grab_set()
 
