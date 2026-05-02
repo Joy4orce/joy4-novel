@@ -71,7 +71,10 @@ DEFAULT_CONFIG = {
             # 0.1은 결정적이라 echo 패턴에 빠지면 못 나옴. 0.4 정도면
             # 정상 청크는 그대로 잘 나오고 echo 청크는 다른 길로 새는 가능성 ↑.
             "temperature":   0.4,
-            "repeat_penalty": 1.05,
+            # 1.05는 사실상 페널티 없는 수준. 비명 등 반복 입력에서 모델이 같은
+            # 문자 무한 생성하는 runaway 루프에 빠짐. 1.1이면 정상 번역 품질에는
+            # 영향 거의 없으면서 반복 lock-in을 막음.
+            "repeat_penalty": 1.1,
             "max_tokens":    8192,          # 응답 최대 토큰 (안 보내면 koboldcpp가 1024로 잘라버림)
             # Gemma 등 system role 미지원 모델 호환 — system 지시를 user 메시지 앞에
             # 병합해서 단일 user turn으로 전송. False로 두면 OpenAI 표준대로 분리 전송.

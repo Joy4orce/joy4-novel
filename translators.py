@@ -929,6 +929,15 @@ class LocalLLMTranslator:
         head = src_norm[:200]
         if len(head) >= 50 and tgt_norm.startswith(head):
             return "원문 echo (입력 앞 200자가 출력 앞에 그대로 등장)"
+        # Runaway 반복 — 같은 문자가 50회 이상 연속 등장. 비명 같은 반복 입력에서
+        # 모델이 lock-in되어 동일 토큰을 계속 생성하다가 max_tokens 캡으로 잘리는
+        # 케이스. 자연스러운 표현(예: "아아아아아!" 10-15자)은 안전하게 통과.
+        m = re.search(r"(.)\1{49,}", tgt_norm, flags=re.DOTALL)
+        if m:
+            ch = m.group(1)
+            run_len = len(m.group(0))
+            disp = ch if not ch.isspace() else repr(ch)
+            return f"비정상 반복 출력 (문자 {disp} 가 {run_len}자 연속, 모델 lock-in 추정)"
         # 일본어 잔존율 (목표가 한국어일 때만 적용)
         is_korean_target = False
         if isinstance(target_lang_name, str):
@@ -959,9 +968,9 @@ class LocalLLMTranslator:
         except (TypeError, ValueError):
             temperature = 0.4
         try:
-            repeat_penalty = float(cfg.get("repeat_penalty", 1.05))
+            repeat_penalty = float(cfg.get("repeat_penalty", 1.1))
         except (TypeError, ValueError):
-            repeat_penalty = 1.05
+            repeat_penalty = 1.1
         try:
             max_tokens = int(cfg.get("max_tokens", 8192))
         except (TypeError, ValueError):
