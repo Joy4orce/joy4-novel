@@ -1464,7 +1464,7 @@ class App(_AppBase):
             or sanitize_filename(base)
             or "novel"
         )
-        out_path = os.path.join(dir_name, f"[Ai 번역]({safe_title}){ext}")
+        out_path = os.path.join(dir_name, f"[Ai 번역]{safe_title}{ext}")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(result)
         return out_path
