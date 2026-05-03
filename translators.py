@@ -847,14 +847,15 @@ class LocalLLMTranslator:
             attempt_cfg = dict(cfg)
             attempt_cfg["temperature"] = attempt_temp
 
-            translation = self._translate_once(text, attempt_cfg)
+            translation, finish_reason = self._translate_once(text, attempt_cfg)
             last_translation = translation
 
             if not verify_enabled:
                 return translation
 
             # 단계 1: 프로그램적 체크 (LLM 호출 없이 빠르게)
-            prog_err = self._programmatic_check(text, translation, target_lang_name)
+            prog_err = self._programmatic_check(
+                text, translation, target_lang_name, finish_reason=finish_reason)
             if prog_err:
                 failures.append(
                     f"시도 {attempt + 1}/{max_attempts} (T={attempt_temp:.2f}): "
@@ -884,23 +885,26 @@ class LocalLLMTranslator:
 
     # ── 단일 번역/검수 호출 ─────────────────────────────────────────────────
 
-    def _translate_once(self, text: str, cfg: dict) -> str:
-        """번역 1회 시도 — 시스템 프롬프트 구성 + API 호출."""
+    def _translate_once(self, text: str, cfg: dict):
+        """번역 1회 시도 — 시스템 프롬프트 구성 + API 호출.
+        반환: (content, finish_reason). _api_call의 튜플을 그대로 전달."""
         system_base = (cfg.get("system_prompt") or "").strip() or _LOCAL_DEFAULT_SYSTEM
         extras = _llm_extras(cfg)
         system = (system_base + "\n\n" + extras).strip() if extras else system_base
         return self._api_call(cfg, system, text)
 
     def _verify_translation(self, source: str, translation: str, cfg: dict) -> str:
-        """동일 모델로 검수. 첫 줄 PASS/FAIL 판정 텍스트 반환."""
+        """동일 모델로 검수. 첫 줄 PASS/FAIL 판정 텍스트 반환.
+        finish_reason은 검수 단계에서 의미 없으므로 버리고 content만."""
         user_content = f"[원문]\n{source}\n\n[번역]\n{translation}"
         # 검수는 결정적으로 — 낮은 temperature, 짧은 응답
         verify_cfg = dict(cfg)
         verify_cfg["temperature"] = 0.1
-        return self._api_call(
+        content, _ = self._api_call(
             verify_cfg, _VERIFY_SYSTEM_PROMPT, user_content,
             override_max_tokens=200,
         )
+        return content
 
     # ── 검수 판정 ──────────────────────────────────────────────────────────
 
@@ -915,9 +919,15 @@ class LocalLLMTranslator:
         return False
 
     @staticmethod
-    def _programmatic_check(source: str, translation: str, target_lang_name) -> str:
+    def _programmatic_check(source: str, translation: str, target_lang_name,
+                            finish_reason=None) -> str:
         """LLM 호출 없이 잡을 수 있는 명백한 실패 모드 검출.
-        통과하면 빈 문자열, 실패면 사유 반환."""
+        통과하면 빈 문자열, 실패면 사유 반환.
+
+        finish_reason 활용:
+          'length' — max_tokens 도달로 잘림. runaway lock-in 강력한 신호.
+          'stop'   — EOS 자연 종료. 긴 반복도 literary scream일 가능성.
+          None     — 서버가 안 알려줌. 보수적으로 'stop'처럼 취급."""
         if not translation or not translation.strip():
             return "빈 응답"
         src_norm = source.strip()
@@ -929,15 +939,24 @@ class LocalLLMTranslator:
         head = src_norm[:200]
         if len(head) >= 50 and tgt_norm.startswith(head):
             return "원문 echo (입력 앞 200자가 출력 앞에 그대로 등장)"
-        # Runaway 반복 — 같은 문자가 50회 이상 연속 등장. 비명 같은 반복 입력에서
-        # 모델이 lock-in되어 동일 토큰을 계속 생성하다가 max_tokens 캡으로 잘리는
-        # 케이스. 자연스러운 표현(예: "아아아아아!" 10-15자)은 안전하게 통과.
+        # Runaway 반복 — 같은 문자 연속 등장. 임계값을 finish_reason에 따라 분기:
+        #   - finish_reason='length' (max_tokens 도달, 잘림): 50자만 넘어도 의심
+        #   - 'stop'/None (자연 종료): 200자 이상만 의심 (literary scream 허용)
         m = re.search(r"(.)\1{49,}", tgt_norm, flags=re.DOTALL)
         if m:
             ch = m.group(1)
             run_len = len(m.group(0))
             disp = ch if not ch.isspace() else repr(ch)
-            return f"비정상 반복 출력 (문자 {disp} 가 {run_len}자 연속, 모델 lock-in 추정)"
+            is_truncated = (finish_reason == "length")
+            if is_truncated:
+                # 잘린 응답 + 50+ 반복 = runaway lock-in 거의 확실
+                return (f"비정상 반복 출력 (문자 {disp} 가 {run_len}자 연속, "
+                        f"max_tokens 도달로 잘림 — runaway lock-in)")
+            elif run_len >= 200:
+                # 자연 종료여도 200자 이상 반복은 의심
+                return (f"비정상 반복 출력 (문자 {disp} 가 {run_len}자 연속, "
+                        f"자연 종료여도 200자 초과)")
+            # 50~199 + 자연 종료 = literary scream 등 정상 표현으로 간주, 통과
         # 일본어 잔존율 (목표가 한국어일 때만 적용)
         is_korean_target = False
         if isinstance(target_lang_name, str):
@@ -958,8 +977,12 @@ class LocalLLMTranslator:
     # ── 저수준 API 호출 ────────────────────────────────────────────────────
 
     def _api_call(self, cfg: dict, system: str, user_text: str,
-                  *, override_max_tokens=None) -> str:
-        """OpenAI 호환 chat/completions 단일 호출. 번역 / 검수 양쪽에서 공용."""
+                  *, override_max_tokens=None):
+        """OpenAI 호환 chat/completions 단일 호출. 번역 / 검수 양쪽에서 공용.
+
+        반환: (content: str, finish_reason: Optional[str])
+          finish_reason 은 'stop' (EOS 자연 종료), 'length' (max_tokens 도달),
+          또는 None (서버가 안 보내줌). 호출자가 runaway 판별에 활용."""
         base_url = (cfg.get("base_url") or "http://localhost:5001/v1").strip().rstrip("/")
         api_key  = (cfg.get("api_key") or "").strip()
         model    = (cfg.get("model") or "local").strip() or "local"
@@ -1042,12 +1065,14 @@ class LocalLLMTranslator:
             )
         try:
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
         except (KeyError, IndexError, ValueError, TypeError) as e:
             raise TranslationError(
                 f"Local LLM 응답 형식 오류 ({type(e).__name__}): {resp.text[:300]}"
             )
-        return _strip_llm_preamble(content or "")
+        return _strip_llm_preamble(content or ""), finish_reason
 
 
 # ──────────────────────────────────────────────────────────────────────────────
