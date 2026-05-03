@@ -1428,11 +1428,43 @@ class App(_AppBase):
         self._file_bar.pack_forget()
         self._file_bar_label.configure(text="")
 
+    def _translate_title(self, title: str) -> str:
+        """파일명(제목)을 현재 선택된 번역기로 단발 번역.
+        검수·사용자 사전·추가 지시는 모두 OFF — 짧은 제목에 과한 비용 안 발생.
+        실패 시 원본 그대로 반환 (저장은 계속 진행)."""
+        title = (title or "").strip()
+        if not title:
+            return title
+        try:
+            api_id      = API_ID_BY_DISPLAY.get(self._api_var.get(), "openai")
+            translator  = TRANSLATORS[api_id]
+            codes       = LANG_CODES.get(api_id, {})
+            src_display = self._src_lang_var.get()
+            tgt_display = self._tgt_lang_var.get()
+            src_code    = codes.get(src_display, src_display)
+            tgt_code    = codes.get(tgt_display, tgt_display)
+            api_cfg = dict(self.cfg["apis"].get(api_id, {}))
+            api_cfg["_prompt"]        = ""
+            api_cfg["_dictionary"]    = ""
+            api_cfg["verify_enabled"] = False
+            out = translator.translate(title, src_code, tgt_code, api_cfg)
+            return ((out or "").strip()) or title
+        except Exception:
+            # 제목 번역이 실패해도 본문 저장은 막지 말 것
+            return title
+
     def _save_translated_file(self, result: str) -> str:
         path = self._dropped_file_path
         dir_name = os.path.dirname(path)
         base, ext = os.path.splitext(os.path.basename(path))
-        out_path = os.path.join(dir_name, f"{base}_번역{ext}")
+        translated_title = self._translate_title(base)
+        # 제목 번역 결과가 빈 문자열이거나 sanitize 후 빈 문자열이면 원본으로 폴백
+        safe_title = (
+            sanitize_filename(translated_title)
+            or sanitize_filename(base)
+            or "novel"
+        )
+        out_path = os.path.join(dir_name, f"[Ai 번역]({safe_title}){ext}")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(result)
         return out_path
