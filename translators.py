@@ -795,6 +795,29 @@ _LOCAL_DEFAULT_SYSTEM = (
 )
 
 
+def _collapse_long_runs(text: str, threshold: int = 50, keep: int = 5) -> str:
+    """입력에서 같은 문자가 N자 이상 연속이면 압축 표기로 치환.
+    검열 마커(■) / 비명(あああ / イィイィ) 같은 패턴이 모델을 lock-in 시켜서
+    runaway 생성으로 빠지는 걸 방지한다. 원문의 의미는 글자 수가 아니라
+    '검열' 또는 '비명' 자체이므로, 개수만 표기에 보존하면 문맥 손실 없음.
+
+    threshold: 이 길이 이상 반복이면 압축 (기본 50자)
+    keep:      앞뒤로 남길 원본 글자 수 (기본 5자씩)
+
+    예: ■ × 2000 → ■■■■■…[같은 문자 2000자 생략]…■■■■■
+    """
+    if threshold < 2 or not text:
+        return text
+    pattern = re.compile(r"(.)\1{" + str(threshold - 1) + r",}", flags=re.DOTALL)
+
+    def replace(m):
+        ch = m.group(1)
+        n = len(m.group(0))
+        return f"{ch * keep}…[같은 문자 {n}자 생략]…{ch * keep}"
+
+    return pattern.sub(replace, text)
+
+
 _VERIFY_SYSTEM_PROMPT = (
     "당신은 번역 품질 검수자입니다. 주어지는 일본어 원문과 한국어 번역을 비교하여 "
     "다음 조건을 모두 만족하는지 판정합니다.\n\n"
@@ -825,6 +848,10 @@ class LocalLLMTranslator:
     def translate(self, text, source_lang_name, target_lang_name, cfg):
         if not text or not text.strip():
             return text
+
+        # 입력 전처리 — 긴 반복 (■ 검열, あああ 비명 등)을 압축해서 모델 lock-in 회피.
+        # 이후 echo 검출 / 번역 호출 / 검수 모두 압축된 텍스트를 source로 사용.
+        text = _collapse_long_runs(text)
 
         verify_enabled = bool(cfg.get("verify_enabled", True))
         try:
