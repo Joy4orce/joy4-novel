@@ -51,6 +51,47 @@ DEFAULT_CONFIG = {
             "model": "haiku",    # haiku / sonnet / opus 또는 전체 모델 ID
             "oauth_tokens": [],  # `claude setup-token` 으로 발급한 장기 토큰. 비우면 시스템 로그인 사용
         },
+        "local": {
+            # OpenAI 호환 엔드포인트 — koboldcpp / LM Studio / Ollama / 자체 서버
+            "base_url": "http://localhost:5001/v1",
+            "api_key":  "sk-local",                 # 더미. 일부 클라이언트가 요구해서 유지
+            "model":    "Gemma-4-E4B-Uncensored",   # koboldcpp는 무시 · LM Studio 등은 식별자 사용
+            "system_prompt": (
+                "당신은 전문 번역가입니다. 주어진 일본어 본문을 한국어로 번역하세요.\n\n"
+                "★ 가장 중요: 응답은 반드시 한국어(한글)로 작성합니다. "
+                "일본어 문자(히라가나·카타카나)를 그대로 복사하면 안 됩니다. "
+                "원문을 그대로 출력하는 것은 명백한 번역 실패입니다.\n\n"
+                "★ 고유명사(인명·기술명·괴물 이름)는 한글 음역으로 옮깁니다. "
+                "예: ペルチェ → 페르체, グランド・ゴーレム → 그랜드 골렘, "
+                "アイテム・ボックス → 아이템 박스.\n\n"
+                "★ 원문의 표현·어투·수위는 한국어로 그대로 보존하고, "
+                "자체 검열이나 완곡화 없이 충실하게 옮기세요.\n\n"
+                "★ 번역문만 출력하세요. 사과·해설·메타 코멘트는 쓰지 마세요."
+            ),
+            # 0.1은 결정적이라 echo 패턴에 빠지면 못 나옴. 0.4 정도면
+            # 정상 청크는 그대로 잘 나오고 echo 청크는 다른 길로 새는 가능성 ↑.
+            "temperature":   0.4,
+            # 1.05는 사실상 페널티 없는 수준. 비명 등 반복 입력에서 모델이 같은
+            # 문자 무한 생성하는 runaway 루프에 빠짐. 1.1이면 정상 번역 품질에는
+            # 영향 거의 없으면서 반복 lock-in을 막음.
+            "repeat_penalty": 1.1,
+            # OpenAI 표준 anti-repetition. repeat_penalty와 메커니즘 다른 보완재 —
+            # 토큰의 누적 등장 빈도에 비례해 페널티 (10번 나오면 11번째 페널티가 더 셈).
+            # 비명 등에서 발생하는 runaway lock-in을 첫 단계에서 막는 효과.
+            "frequency_penalty": 0.5,
+            "max_tokens":    8192,          # 응답 최대 토큰 (안 보내면 koboldcpp가 1024로 잘라버림)
+            # Gemma 등 system role 미지원 모델 호환 — system 지시를 user 메시지 앞에
+            # 병합해서 단일 user turn으로 전송. False로 두면 OpenAI 표준대로 분리 전송.
+            "merge_system_into_user": True,
+            # 번역 후 동일 모델로 검수, 실패 시 temperature를 올려가며 재시도.
+            "verify_enabled":      True,
+            "verify_max_attempts": 3,
+            "max_chars":     4000,
+            # 180은 runaway 발생 시 8192 토큰 다 만들기 전에 끊겨서 retry 루프가
+            # 발동 못함. 300이면 220s 정도 걸리는 runaway도 끝까지 받아서
+            # 자동검출 → 다음 시도 (T 상승) 트리거 가능.
+            "timeout":       300,
+        },
         "pixiv": {
             "session_id": "",
         },

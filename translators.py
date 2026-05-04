@@ -253,6 +253,7 @@ MAX_CHARS = {
     "deepl":    4000,
     "gemini":   6000,
     "claude":   6000,
+    "local":    4000,   # 4K 컨텍스트 가정 (사용자 조정 가능)
 }
 
 
@@ -330,6 +331,9 @@ LANG_CODES = {
                  "중국어(간체)": "Simplified Chinese", "중국어(번체)": "Traditional Chinese",
                  "프랑스어": "French", "독일어": "German", "스페인어": "Spanish", "러시아어": "Russian"},
     "claude":   {"자동감지": None, "한국어": "Korean", "영어": "English", "일본어": "Japanese",
+                 "중국어(간체)": "Simplified Chinese", "중국어(번체)": "Traditional Chinese",
+                 "프랑스어": "French", "독일어": "German", "스페인어": "Spanish", "러시아어": "Russian"},
+    "local":    {"자동감지": None, "한국어": "Korean", "영어": "English", "일본어": "Japanese",
                  "중국어(간체)": "Simplified Chinese", "중국어(번체)": "Traditional Chinese",
                  "프랑스어": "French", "독일어": "German", "스페인어": "Spanish", "러시아어": "Russian"},
 }
@@ -772,6 +776,333 @@ class ClaudeTranslator:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Local LLM (OpenAI 호환 엔드포인트 — koboldcpp / LM Studio / Ollama / 자체 서버)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 사용자가 시스템 프롬프트를 비웠을 때만 사용되는 폴백.
+# config.py 의 DEFAULT_CONFIG["apis"]["local"]["system_prompt"] 와 의미상 일치.
+_LOCAL_DEFAULT_SYSTEM = (
+    "당신은 전문 번역가입니다. 주어진 일본어 본문을 한국어로 번역하세요.\n\n"
+    "★ 가장 중요: 응답은 반드시 한국어(한글)로 작성합니다. "
+    "일본어 문자(히라가나·카타카나)를 그대로 복사하면 안 됩니다. "
+    "원문을 그대로 출력하는 것은 명백한 번역 실패입니다.\n\n"
+    "★ 고유명사(인명·기술명·괴물 이름)는 한글 음역으로 옮깁니다. "
+    "예: ペルチェ → 페르체, グランド・ゴーレム → 그랜드 골렘, "
+    "アイテム・ボックス → 아이템 박스.\n\n"
+    "★ 원문의 표현·어투·수위는 한국어로 그대로 보존하고, "
+    "자체 검열이나 완곡화 없이 충실하게 옮기세요.\n\n"
+    "★ 번역문만 출력하세요. 사과·해설·메타 코멘트는 쓰지 마세요."
+)
+
+
+def _collapse_long_runs(text: str, threshold: int = 50, keep: int = 5) -> str:
+    """입력에서 같은 문자가 N자 이상 연속이면 압축 표기로 치환.
+    검열 마커(■) / 비명(あああ / イィイィ) 같은 패턴이 모델을 lock-in 시켜서
+    runaway 생성으로 빠지는 걸 방지한다. 원문의 의미는 글자 수가 아니라
+    '검열' 또는 '비명' 자체이므로, 개수만 표기에 보존하면 문맥 손실 없음.
+
+    threshold: 이 길이 이상 반복이면 압축 (기본 50자)
+    keep:      앞뒤로 남길 원본 글자 수 (기본 5자씩)
+
+    예: ■ × 2000 → ■■■■■…[같은 문자 2000자 생략]…■■■■■
+    """
+    if threshold < 2 or not text:
+        return text
+    pattern = re.compile(r"(.)\1{" + str(threshold - 1) + r",}", flags=re.DOTALL)
+
+    def replace(m):
+        ch = m.group(1)
+        n = len(m.group(0))
+        return f"{ch * keep}…[같은 문자 {n}자 생략]…{ch * keep}"
+
+    return pattern.sub(replace, text)
+
+
+_VERIFY_SYSTEM_PROMPT = (
+    "당신은 번역 품질 검수자입니다. 주어지는 일본어 원문과 한국어 번역을 비교하여 "
+    "다음 조건을 모두 만족하는지 판정합니다.\n\n"
+    "[검수 조건]\n"
+    "1. 원문의 내용이 한국어로 옮겨졌고, 일본어 본문이 그대로 남아있지 않다.\n"
+    "2. 누락된 문장·문단이 없고, 의미가 원문과 일치한다.\n"
+    "3. 사과·거부·검토 메타 텍스트가 포함되지 않은 순수 번역만 있다.\n\n"
+    "[출력 규칙 — 반드시 지키세요]\n"
+    "- 첫 줄에 정확히 \"PASS\" 또는 \"FAIL\" 한 단어만 출력합니다.\n"
+    "- FAIL이면 둘째 줄에 한 문장으로 사유를 적습니다.\n"
+    "- 그 외 어떤 설명·번역·재작성도 출력하지 마세요."
+)
+
+
+class LocalLLMTranslator:
+    """OpenAI 호환 /v1/chat/completions 엔드포인트로 호출.
+    특정 모델·백엔드에 묶이지 않고 base_url / model / system_prompt 모두
+    사용자가 설정 가능. 키 로테이션 없음 (단일 엔드포인트).
+
+    검수가 활성화된 경우 (cfg.verify_enabled=True, 기본값) 번역마다
+    프로그램적 체크 → 동일 모델로 LLM 검수 → PASS면 채택, FAIL이면
+    temperature를 올려가며 재시도. 모두 실패하면 청크를 실패 마킹."""
+
+    name = "Local LLM"
+
+    # ── 공개 진입점 ─────────────────────────────────────────────────────────
+
+    def translate(self, text, source_lang_name, target_lang_name, cfg):
+        if not text or not text.strip():
+            return text
+
+        # 입력 전처리 — 긴 반복 (■ 검열, あああ 비명 등)을 압축해서 모델 lock-in 회피.
+        # 이후 echo 검출 / 번역 호출 / 검수 모두 압축된 텍스트를 source로 사용.
+        text = _collapse_long_runs(text)
+
+        verify_enabled = bool(cfg.get("verify_enabled", True))
+        try:
+            max_attempts = int(cfg.get("verify_max_attempts", 3))
+        except (TypeError, ValueError):
+            max_attempts = 3
+        if not verify_enabled:
+            max_attempts = 1
+        try:
+            base_temp = float(cfg.get("temperature", 0.4))
+        except (TypeError, ValueError):
+            base_temp = 0.4
+
+        last_translation = ""
+        failures = []
+
+        for attempt in range(max_attempts):
+            # 시도마다 temperature 점진 상승 — 같은 echo가 반복되는 걸 방지
+            attempt_temp = min(1.0, base_temp + 0.2 * attempt)
+            attempt_cfg = dict(cfg)
+            attempt_cfg["temperature"] = attempt_temp
+
+            translation, finish_reason = self._translate_once(text, attempt_cfg)
+            last_translation = translation
+
+            if not verify_enabled:
+                return translation
+
+            # 단계 1: 프로그램적 체크 (LLM 호출 없이 빠르게)
+            prog_err = self._programmatic_check(
+                text, translation, target_lang_name, finish_reason=finish_reason)
+            if prog_err:
+                failures.append(
+                    f"시도 {attempt + 1}/{max_attempts} (T={attempt_temp:.2f}): "
+                    f"자동검출 — {prog_err}"
+                )
+                continue
+
+            # 단계 2: 동일 모델로 PASS/FAIL 검수
+            try:
+                verdict = self._verify_translation(text, translation, cfg)
+            except TranslationError:
+                # 검수 호출 자체 실패 — 번역 결과는 살리고 통과 처리
+                return translation
+
+            if self._verdict_is_pass(verdict):
+                return translation
+            failures.append(
+                f"시도 {attempt + 1}/{max_attempts} (T={attempt_temp:.2f}): "
+                f"LLM 검수 — {verdict.strip()[:200]}"
+            )
+
+        raise TranslationError(
+            f"Local LLM 검수 {max_attempts}회 모두 실패.\n"
+            + "\n".join(failures)
+            + f"\n\n마지막 번역(앞부분):\n{last_translation[:300]}"
+        )
+
+    # ── 단일 번역/검수 호출 ─────────────────────────────────────────────────
+
+    def _translate_once(self, text: str, cfg: dict):
+        """번역 1회 시도 — 시스템 프롬프트 구성 + API 호출.
+        반환: (content, finish_reason). _api_call의 튜플을 그대로 전달."""
+        system_base = (cfg.get("system_prompt") or "").strip() or _LOCAL_DEFAULT_SYSTEM
+        extras = _llm_extras(cfg)
+        system = (system_base + "\n\n" + extras).strip() if extras else system_base
+        return self._api_call(cfg, system, text)
+
+    def _verify_translation(self, source: str, translation: str, cfg: dict) -> str:
+        """동일 모델로 검수. 첫 줄 PASS/FAIL 판정 텍스트 반환.
+        finish_reason은 검수 단계에서 의미 없으므로 버리고 content만."""
+        user_content = f"[원문]\n{source}\n\n[번역]\n{translation}"
+        # 검수는 결정적으로 — 낮은 temperature, 짧은 응답
+        verify_cfg = dict(cfg)
+        verify_cfg["temperature"] = 0.1
+        content, _ = self._api_call(
+            verify_cfg, _VERIFY_SYSTEM_PROMPT, user_content,
+            override_max_tokens=200,
+        )
+        return content
+
+    # ── 검수 판정 ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _verdict_is_pass(verdict: str) -> bool:
+        """검수 응답에서 PASS/FAIL 판정. 둘 다 없으면 보수적으로 FAIL."""
+        head = (verdict or "").strip().upper()[:80]
+        if "FAIL" in head:
+            return False
+        if "PASS" in head:
+            return True
+        return False
+
+    @staticmethod
+    def _programmatic_check(source: str, translation: str, target_lang_name,
+                            finish_reason=None) -> str:
+        """LLM 호출 없이 잡을 수 있는 명백한 실패 모드 검출.
+        통과하면 빈 문자열, 실패면 사유 반환.
+
+        finish_reason 활용:
+          'length' — max_tokens 도달로 잘림. runaway lock-in 강력한 신호.
+          'stop'   — EOS 자연 종료. 긴 반복도 literary scream일 가능성.
+          None     — 서버가 안 알려줌. 보수적으로 'stop'처럼 취급."""
+        if not translation or not translation.strip():
+            return "빈 응답"
+        src_norm = source.strip()
+        tgt_norm = translation.strip()
+        # 완전 echo
+        if src_norm == tgt_norm:
+            return "원문 echo (출력 = 입력)"
+        # 부분 echo — 입력 앞 200자가 출력 앞에 그대로 등장
+        head = src_norm[:200]
+        if len(head) >= 50 and tgt_norm.startswith(head):
+            return "원문 echo (입력 앞 200자가 출력 앞에 그대로 등장)"
+        # Runaway 반복 — 같은 문자 연속 등장. 임계값을 finish_reason에 따라 분기:
+        #   - finish_reason='length' (max_tokens 도달, 잘림): 50자만 넘어도 의심
+        #   - 'stop'/None (자연 종료): 200자 이상만 의심 (literary scream 허용)
+        m = re.search(r"(.)\1{49,}", tgt_norm, flags=re.DOTALL)
+        if m:
+            ch = m.group(1)
+            run_len = len(m.group(0))
+            disp = ch if not ch.isspace() else repr(ch)
+            is_truncated = (finish_reason == "length")
+            if is_truncated:
+                # 잘린 응답 + 50+ 반복 = runaway lock-in 거의 확실
+                return (f"비정상 반복 출력 (문자 {disp} 가 {run_len}자 연속, "
+                        f"max_tokens 도달로 잘림 — runaway lock-in)")
+            elif run_len >= 200:
+                # 자연 종료여도 200자 이상 반복은 의심
+                return (f"비정상 반복 출력 (문자 {disp} 가 {run_len}자 연속, "
+                        f"자연 종료여도 200자 초과)")
+            # 50~199 + 자연 종료 = literary scream 등 정상 표현으로 간주, 통과
+        # 일본어 잔존율 (목표가 한국어일 때만 적용)
+        is_korean_target = False
+        if isinstance(target_lang_name, str):
+            tn = target_lang_name.strip().lower()
+            is_korean_target = "한국어" in target_lang_name or tn == "korean"
+        if is_korean_target:
+            ja_chars = sum(
+                1 for c in tgt_norm
+                if ("぀" <= c <= "ゟ") or ("゠" <= c <= "ヿ")
+            )
+            non_space = sum(1 for c in tgt_norm if not c.isspace())
+            if non_space > 0:
+                ratio = ja_chars / non_space
+                if ratio > 0.3:
+                    return f"일본어 문자 잔존율 {ratio:.0%} (>30%)"
+        return ""
+
+    # ── 저수준 API 호출 ────────────────────────────────────────────────────
+
+    def _api_call(self, cfg: dict, system: str, user_text: str,
+                  *, override_max_tokens=None):
+        """OpenAI 호환 chat/completions 단일 호출. 번역 / 검수 양쪽에서 공용.
+
+        반환: (content: str, finish_reason: Optional[str])
+          finish_reason 은 'stop' (EOS 자연 종료), 'length' (max_tokens 도달),
+          또는 None (서버가 안 보내줌). 호출자가 runaway 판별에 활용."""
+        base_url = (cfg.get("base_url") or "http://localhost:5001/v1").strip().rstrip("/")
+        api_key  = (cfg.get("api_key") or "").strip()
+        model    = (cfg.get("model") or "local").strip() or "local"
+        try:
+            temperature = float(cfg.get("temperature", 0.4))
+        except (TypeError, ValueError):
+            temperature = 0.4
+        try:
+            repeat_penalty = float(cfg.get("repeat_penalty", 1.1))
+        except (TypeError, ValueError):
+            repeat_penalty = 1.1
+        try:
+            frequency_penalty = float(cfg.get("frequency_penalty", 0.5))
+        except (TypeError, ValueError):
+            frequency_penalty = 0.5
+        try:
+            max_tokens = int(cfg.get("max_tokens", 8192))
+        except (TypeError, ValueError):
+            max_tokens = 8192
+        if override_max_tokens is not None:
+            try:
+                max_tokens = int(override_max_tokens)
+            except (TypeError, ValueError):
+                pass
+        try:
+            timeout = int(cfg.get("timeout", 300))
+        except (TypeError, ValueError):
+            timeout = 300
+
+        # Gemma 등 system role 미지원 모델 호환 (자세한 설명은 config.py 참조)
+        merge_system = bool(cfg.get("merge_system_into_user", True))
+        if merge_system and system:
+            messages = [{"role": "user", "content": f"{system}\n\n{user_text}"}]
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_text},
+            ]
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            # OpenAI 표준 — 누적 빈도 기반 anti-repetition. runaway 차단.
+            "frequency_penalty": frequency_penalty,
+            # OpenAI 표준엔 없는 필드 — koboldcpp / LM Studio 등이 인식.
+            # 미지원 서버는 무시함 (호환성 OK).
+            "repeat_penalty": repeat_penalty,
+        }
+
+        try:
+            resp = _post_with_retry(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=timeout,
+            )
+        except requests.exceptions.ConnectionError:
+            raise TranslationError(
+                f"Local LLM 서버에 연결할 수 없습니다.\n"
+                f"  • Endpoint: {base_url}\n"
+                f"  • F:\\Joy4_LLM\\scripts\\start_kobold.bat 을 실행했는지 확인하세요.\n"
+                f"  • 또는 LM Studio / Ollama 등 OpenAI 호환 서버가 실행 중인지 확인하세요."
+            )
+        except requests.exceptions.Timeout:
+            raise TranslationError(
+                f"Local LLM 응답 시간 초과 ({timeout}s).\n"
+                f"  • 모델 로딩 중이거나 청크가 너무 클 수 있습니다.\n"
+                f"  • 설정에서 max_chars 를 줄이거나 timeout 을 늘리세요."
+            )
+
+        if resp.status_code != 200:
+            raise TranslationError(
+                f"Local LLM 오류 {resp.status_code}: {resp.text[:300]}"
+            )
+        try:
+            data = resp.json()
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
+        except (KeyError, IndexError, ValueError, TypeError) as e:
+            raise TranslationError(
+                f"Local LLM 응답 형식 오류 ({type(e).__name__}): {resp.text[:300]}"
+            )
+        return _strip_llm_preamble(content or ""), finish_reason
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Registry
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -782,4 +1113,5 @@ TRANSLATORS = {
     "deepl":    DeepLTranslator(),
     "gemini":   GeminiTranslator(),
     "claude":   ClaudeTranslator(),
+    "local":    LocalLLMTranslator(),
 }

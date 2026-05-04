@@ -1,6 +1,6 @@
 """
 Joy4_Novel - 다중 AI API 번역기
-지원: ChatGPT, Naver Papago, Google Translate, DeepL, Google Gemini, Claude
+지원: ChatGPT, Naver Papago, Google Translate, DeepL, Google Gemini, Claude, Local LLM
 """
 
 import os
@@ -8,6 +8,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
+
+import requests
 
 import config as cfg_module
 from translators import TRANSLATORS, LANG_CODES, TranslationError, MAX_CHARS, chunk_text
@@ -55,6 +57,7 @@ API_LIST = [
     ("deepl",    "DeepL"),
     ("gemini",   "Google Gemini"),
     ("claude",   "Claude (CLI / 구독)"),
+    ("local",    "Local LLM"),
 ]
 API_ID_BY_DISPLAY = {v: k for k, v in API_LIST}
 API_DISPLAY_BY_ID = {k: v for k, v in API_LIST}
@@ -91,7 +94,7 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
 
         self.title("API 설정")
-        self.geometry("640x460")
+        self.geometry("640x680")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.grab_set()
@@ -108,7 +111,7 @@ class SettingsDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"640x460+{x}+{y}")
+        self.geometry(f"640x680+{x}+{y}")
 
     # ── UI 구성 ──────────────────────────────────────────────────────────────
 
@@ -144,6 +147,7 @@ class SettingsDialog(tk.Toplevel):
         self._panels["deepl"]    = self._make_panel_deepl()
         self._panels["gemini"]   = self._make_panel_gemini()
         self._panels["claude"]   = self._make_panel_claude()
+        self._panels["local"]    = self._make_panel_local()
         self._panels["pixiv"]    = self._make_panel_pixiv()
 
         # 하단 버튼
@@ -288,6 +292,157 @@ class SettingsDialog(tk.Toplevel):
                    "모델은 별칭(haiku 등) 또는 전체 ID(claude-haiku-4-5) 사용 가능.")
         return f
 
+    def _make_panel_local(self):
+        f = self._make_panel("Local LLM (OpenAI 호환)", "")
+        self._row(f, "Endpoint URL", "local_base_url",
+                  placeholder="예: http://localhost:5001/v1")
+        self._row(f, "API Key", "local_api_key", show="*",
+                  placeholder="더미 OK (예: sk-local)")
+        self._row(f, "Model 이름", "local_model",
+                  placeholder="koboldcpp는 무시 · LM Studio는 모델 ID")
+
+        # Temperature + Repeat Penalty 한 줄로 (좁은 입력칸 2개)
+        row = tk.Frame(f, bg=BG)
+        row.pack(fill="x", pady=5)
+        tk.Label(row, text="Temperature", font=FONT_MAIN, bg=BG, fg=FG2,
+                 width=14, anchor="w").pack(side="left")
+        var_t = tk.StringVar()
+        tk.Entry(row, textvariable=var_t, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        self._vars["local_temperature"] = var_t
+        tk.Label(row, text="    Repeat Penalty", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left", padx=(20, 6))
+        var_r = tk.StringVar()
+        tk.Entry(row, textvariable=var_r, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        self._vars["local_repeat_penalty"] = var_r
+
+        # Max Tokens — 응답 길이 한도 (안 보내면 koboldcpp가 1024로 잘라버림)
+        row2 = tk.Frame(f, bg=BG)
+        row2.pack(fill="x", pady=5)
+        tk.Label(row2, text="Max Tokens", font=FONT_MAIN, bg=BG, fg=FG2,
+                 width=14, anchor="w").pack(side="left")
+        var_mt = tk.StringVar()
+        tk.Entry(row2, textvariable=var_mt, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        tk.Label(row2, text="  응답 최대 토큰 (기본 8192) · 짧으면 번역이 중간에 잘림",
+                 font=("Malgun Gothic", 8), bg=BG, fg=FG2, anchor="w"
+                 ).pack(side="left", padx=(8, 0))
+        self._vars["local_max_tokens"] = var_mt
+
+        # Frequency Penalty — OpenAI 표준 누적 빈도 페널티 (runaway 차단)
+        row_fp = tk.Frame(f, bg=BG)
+        row_fp.pack(fill="x", pady=5)
+        tk.Label(row_fp, text="Freq Penalty", font=FONT_MAIN, bg=BG, fg=FG2,
+                 width=14, anchor="w").pack(side="left")
+        var_fp = tk.StringVar()
+        tk.Entry(row_fp, textvariable=var_fp, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=8
+                 ).pack(side="left")
+        tk.Label(row_fp, text="  반복 토큰 누적 페널티 (0~2.0, 기본 0.5) · runaway 방지",
+                 font=("Malgun Gothic", 8), bg=BG, fg=FG2, anchor="w"
+                 ).pack(side="left", padx=(8, 0))
+        self._vars["local_frequency_penalty"] = var_fp
+
+        # 검수 (Verify) — 동일 모델로 번역 검수, 실패 시 재시도
+        row3 = tk.Frame(f, bg=BG)
+        row3.pack(fill="x", pady=5)
+        var_v = tk.BooleanVar()
+        tk.Checkbutton(row3, text="검수 활성화 (실패 시 재번역)", variable=var_v,
+                       font=FONT_MAIN, bg=BG, fg=FG, selectcolor=BG3,
+                       activebackground=BG, activeforeground=FG,
+                       relief="flat", cursor="hand2"
+                       ).pack(side="left")
+        self._vars["local_verify_enabled"] = var_v
+        tk.Label(row3, text="  ·  최대 시도", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left", padx=(20, 6))
+        var_va = tk.StringVar()
+        tk.Entry(row3, textvariable=var_va, font=FONT_MAIN, bg=BG3, fg=FG,
+                 insertbackground=FG, relief="flat", bd=6, width=4
+                 ).pack(side="left")
+        tk.Label(row3, text="회", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left", padx=(4, 0))
+        self._vars["local_verify_max_attempts"] = var_va
+
+        # System Prompt (멀티라인) — 라벨 + 우측에 "기본값 복원" 버튼
+        sp_head = tk.Frame(f, bg=BG)
+        sp_head.pack(fill="x", pady=(10, 3))
+        tk.Label(sp_head, text="System Prompt", font=FONT_MAIN, bg=BG, fg=FG2,
+                 anchor="w").pack(side="left")
+        tk.Button(sp_head, text="기본값 복원", font=("Malgun Gothic", 9),
+                  bg=BG3, fg=FG, relief="flat", padx=10, pady=2,
+                  cursor="hand2", command=self._reset_local_system_prompt
+                  ).pack(side="right")
+        sp = tk.Text(f, font=FONT_MAIN, bg=BG3, fg=FG, insertbackground=FG,
+                     relief="flat", bd=6, height=5, wrap="word", undo=True)
+        sp.pack(fill="x")
+        self._vars["local_system_prompt"] = sp
+
+        # 연결 테스트 버튼 + 상태 라벨
+        test_row = tk.Frame(f, bg=BG)
+        test_row.pack(fill="x", pady=(10, 0))
+        tk.Button(test_row, text="연결 테스트", font=FONT_MAIN,
+                  bg=BG3, fg=FG, relief="flat", padx=14, pady=4,
+                  cursor="hand2", command=self._test_local_connection
+                  ).pack(side="left")
+        self._local_test_label = tk.Label(test_row, text="", font=("Malgun Gothic", 9),
+                                          bg=BG, fg=FG2, anchor="w")
+        self._local_test_label.pack(side="left", padx=(10, 0))
+
+        self._hint(f,
+                   "koboldcpp / LM Studio / Ollama / 자체 OpenAI 호환 서버 모두 지원.\n"
+                   "검수 활성화 시 청크당 ~+25% 시간 소요 · 재시도마다 temperature 점진 상승.")
+        return f
+
+    def _reset_local_system_prompt(self):
+        """System Prompt 텍스트 영역을 DEFAULT_CONFIG의 기본값으로 되돌림.
+        이미 저장된 사용자 커스텀 prompt를 새 기본값으로 갱신하고 싶을 때 사용."""
+        default_prompt = cfg_module.DEFAULT_CONFIG["apis"]["local"]["system_prompt"]
+        self._set_val("local_system_prompt", default_prompt)
+
+    def _test_local_connection(self):
+        """현재 입력된 endpoint/api_key로 /v1/models 호출해 응답 확인."""
+        base_url = self._vars["local_base_url"].get().strip().rstrip("/")
+        api_key  = self._vars["local_api_key"].get().strip()
+        if not base_url:
+            self._local_test_label.configure(
+                text="Endpoint URL이 비어있습니다.", fg="#ff8888")
+            return
+        self._local_test_label.configure(text="연결 중...", fg=FG2)
+
+        def worker():
+            try:
+                headers = {}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                r = requests.get(f"{base_url}/models", headers=headers, timeout=5)
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        n = len(data.get("data", []))
+                        msg = f"✓ 연결 성공 (모델 {n}개 응답)"
+                    except Exception:
+                        msg = "✓ 연결 성공 (응답 200, 파싱 불가)"
+                    color = "#88ff88"
+                else:
+                    msg = f"✗ HTTP {r.status_code}: {r.text[:80]}"
+                    color = "#ff8888"
+            except requests.exceptions.ConnectionError:
+                msg = "✗ 서버 응답 없음 (실행 중인지 확인)"
+                color = "#ff8888"
+            except requests.exceptions.Timeout:
+                msg = "✗ 응답 시간 초과 (5초)"
+                color = "#ff8888"
+            except Exception as e:
+                msg = f"✗ {type(e).__name__}: {str(e)[:80]}"
+                color = "#ff8888"
+            self.after(0, lambda: self._local_test_label.configure(text=msg, fg=color))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _make_panel_pixiv(self):
         f = self._make_panel("Pixiv (크롤러 로그인)", "")
         self._row(f, "Session ID", "pixiv_session_id", show="*",
@@ -320,6 +475,29 @@ class SettingsDialog(tk.Toplevel):
         self._vars["claude_model"].set(a.get("claude", {}).get("model", "haiku"))
         self._set_val("claude_oauth_tokens", a.get("claude", {}).get("oauth_tokens", []))
 
+        loc = a.get("local", {})
+        local_defaults = cfg_module.DEFAULT_CONFIG["apis"]["local"]
+        self._vars["local_base_url"].set(
+            loc.get("base_url", local_defaults["base_url"]))
+        self._vars["local_api_key"].set(
+            loc.get("api_key",  local_defaults["api_key"]))
+        self._vars["local_model"].set(
+            loc.get("model",    local_defaults["model"]))
+        self._vars["local_temperature"].set(
+            str(loc.get("temperature", local_defaults["temperature"])))
+        self._vars["local_repeat_penalty"].set(
+            str(loc.get("repeat_penalty", local_defaults["repeat_penalty"])))
+        self._vars["local_max_tokens"].set(
+            str(loc.get("max_tokens", local_defaults["max_tokens"])))
+        self._vars["local_frequency_penalty"].set(
+            str(loc.get("frequency_penalty", local_defaults["frequency_penalty"])))
+        self._vars["local_verify_enabled"].set(
+            bool(loc.get("verify_enabled", local_defaults["verify_enabled"])))
+        self._vars["local_verify_max_attempts"].set(
+            str(loc.get("verify_max_attempts", local_defaults["verify_max_attempts"])))
+        self._set_val("local_system_prompt",
+            loc.get("system_prompt", local_defaults["system_prompt"]))
+
         self._vars["pixiv_session_id"].set(a.get("pixiv", {}).get("session_id", ""))
 
     def _save(self):
@@ -349,6 +527,49 @@ class SettingsDialog(tk.Toplevel):
         a["claude"]["model"] = self._vars["claude_model"].get().strip() or "haiku"
         a["claude"]["oauth_tokens"] = self._parse_keys("claude_oauth_tokens")
 
+        a.setdefault("local", {})
+        local_defaults = cfg_module.DEFAULT_CONFIG["apis"]["local"]
+        a["local"]["base_url"] = (self._vars["local_base_url"].get().strip()
+                                  or local_defaults["base_url"])
+        a["local"]["api_key"]  = self._vars["local_api_key"].get().strip()
+        a["local"]["model"]    = (self._vars["local_model"].get().strip()
+                                  or local_defaults["model"])
+        try:
+            a["local"]["temperature"] = float(
+                self._vars["local_temperature"].get().strip()
+                or str(local_defaults["temperature"]))
+        except ValueError:
+            a["local"]["temperature"] = local_defaults["temperature"]
+        try:
+            a["local"]["repeat_penalty"] = float(
+                self._vars["local_repeat_penalty"].get().strip()
+                or str(local_defaults["repeat_penalty"]))
+        except ValueError:
+            a["local"]["repeat_penalty"] = local_defaults["repeat_penalty"]
+        try:
+            a["local"]["max_tokens"] = int(
+                self._vars["local_max_tokens"].get().strip()
+                or str(local_defaults["max_tokens"]))
+        except ValueError:
+            a["local"]["max_tokens"] = local_defaults["max_tokens"]
+        try:
+            a["local"]["frequency_penalty"] = float(
+                self._vars["local_frequency_penalty"].get().strip()
+                or str(local_defaults["frequency_penalty"]))
+        except ValueError:
+            a["local"]["frequency_penalty"] = local_defaults["frequency_penalty"]
+        a["local"]["verify_enabled"] = bool(self._vars["local_verify_enabled"].get())
+        try:
+            a["local"]["verify_max_attempts"] = max(1, int(
+                self._vars["local_verify_max_attempts"].get().strip()
+                or str(local_defaults["verify_max_attempts"])))
+        except ValueError:
+            a["local"]["verify_max_attempts"] = local_defaults["verify_max_attempts"]
+        a["local"]["system_prompt"] = self._get_val("local_system_prompt").strip()
+        # max_chars / timeout 은 설정 파일에서 직접 편집 (UI 노출 X)
+        a["local"].setdefault("max_chars", 4000)
+        a["local"].setdefault("timeout", 180)
+
         a.setdefault("pixiv", {})["session_id"] = self._vars["pixiv_session_id"].get().strip()
 
         cfg_module.save(self.cfg)
@@ -367,7 +588,7 @@ class PromptDialog(tk.Toplevel):
         self.result = None
 
         self.title("번역 프롬프트 · 사용자 사전")
-        self.geometry("640x560")
+        self.geometry("640x680")
         self.configure(bg=BG)
         self.grab_set()
 
@@ -914,7 +1135,12 @@ class App(_AppBase):
 
         self._translating = False
         self._cancel_translate = False
-        self._dropped_file_path = None
+        self._dropped_file_path = None         # 현재 처리 중 파일 (배치 모드에서 파일별로 갱신)
+
+        # 다중 파일 큐 — 드롭된 파일들을 순차 번역
+        self._files = []                       # [{'path': abspath, 'status': 'wait|processing|done|fail'}, ...]
+        self._batch_running = False
+        self._batch_current_index = -1         # 현재 처리 중 인덱스 (-1 = idle)
 
         self._setup_style()
         self._build_ui()
@@ -1025,14 +1251,31 @@ class App(_AppBase):
         tk.Label(src_hdr, text="원본 텍스트", font=FONT_MAIN, bg=BG3, fg=FG2,
                  anchor="w").pack(side="left")
 
-        # 파일 드롭 정보 표시줄 (파일이 로드됐을 때만 표시)
-        self._file_bar = tk.Frame(src_box, bg="#2e3a2e")
-        self._file_bar_label = tk.Label(self._file_bar, text="", font=("Malgun Gothic", 8),
-                                        bg="#2e3a2e", fg="#80e080", anchor="w")
-        self._file_bar_label.pack(side="left", padx=8, pady=3, fill="x", expand=True)
-        tk.Button(self._file_bar, text="✕", font=("Malgun Gothic", 8),
+        # 파일 큐 — 드롭한 파일들을 모아서 순차 번역 (큐 비어있으면 숨김)
+        self._file_queue_frame = tk.Frame(src_box, bg="#2e3a2e")
+        _qhdr = tk.Frame(self._file_queue_frame, bg="#2e3a2e")
+        _qhdr.pack(fill="x")
+        self._file_queue_label = tk.Label(
+            _qhdr, text="", font=("Malgun Gothic", 8),
+            bg="#2e3a2e", fg="#80e080", anchor="w")
+        self._file_queue_label.pack(side="left", padx=8, pady=3, fill="x", expand=True)
+        tk.Button(_qhdr, text="✕", font=("Malgun Gothic", 8),
                   bg="#2e3a2e", fg="#80e080", relief="flat", padx=6, pady=1,
-                  cursor="hand2", command=self._clear_file).pack(side="right", padx=4)
+                  cursor="hand2", command=self._clear_file_queue
+                  ).pack(side="right", padx=4)
+        self._file_listbox = tk.Listbox(
+            self._file_queue_frame,
+            font=("Malgun Gothic", 9),
+            bg=BG3, fg=FG, selectbackground=ACCENT, selectforeground=BTN_FG,
+            relief="flat", bd=0, height=4, activestyle="none",
+            exportselection=False, highlightthickness=0)
+        self._file_listbox.pack(fill="x", padx=4, pady=(0, 4))
+        self._file_listbox.bind("<Delete>", self._on_listbox_delete)
+        self._file_listbox.bind("<Double-Button-1>", self._on_listbox_double_click)
+        # 호환: 기존 코드 일부가 _file_bar / _file_bar_label 을 참조하는 경우
+        # 동일한 Frame/Label 을 가리키도록 alias 유지
+        self._file_bar = self._file_queue_frame
+        self._file_bar_label = self._file_queue_label
 
         self._src_text = tk.Text(src_box, font=FONT_LARGE, bg=BG3, fg=FG,
                                  insertbackground=FG, relief="flat", bd=0,
@@ -1166,52 +1409,174 @@ class App(_AppBase):
         else:
             self._tgt_lang_var.set(src if src in LANGUAGES[1:] else "영어")
 
-    def _on_file_drop(self, event):
-        raw = event.data.strip()
-        # tkinterdnd2는 공백 포함 경로를 {}로 감쌈
-        if raw.startswith("{") and raw.endswith("}"):
-            raw = raw[1:-1]
-        # 여러 파일이 드롭된 경우 첫 번째만
-        path = raw.split("} {")[0].strip("{}")
+    # ── 파일 큐 ────────────────────────────────────────────────────────────
 
-        if not path.lower().endswith(".txt"):
-            self._status_var.set("txt 파일만 지원합니다.")
-            return
-
+    @staticmethod
+    def _read_file_text(path: str) -> str:
+        """파일을 utf-8 우선, 실패 시 cp949로 읽음. 둘 다 실패하면 예외 raise."""
         try:
             with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
+                return f.read()
         except UnicodeDecodeError:
-            try:
-                with open(path, "r", encoding="cp949") as f:
-                    content = f.read()
-            except Exception as e:
-                messagebox.showerror("파일 오류", f"파일을 읽을 수 없습니다:\n{e}", parent=self)
-                return
-        except Exception as e:
-            messagebox.showerror("파일 오류", f"파일을 읽을 수 없습니다:\n{e}", parent=self)
-            return
+            with open(path, "r", encoding="cp949") as f:
+                return f.read()
 
-        self._dropped_file_path = path
+    def _render_file_queue(self):
+        """_files 상태를 헤더 + Listbox로 렌더링. 큐 비어있으면 frame 숨김."""
+        self._file_listbox.delete(0, "end")
+        if not self._files:
+            self._file_queue_frame.pack_forget()
+            self._file_queue_label.configure(text="")
+            return
+        n = len(self._files)
+        n_done = sum(1 for f in self._files if f["status"] == "done")
+        n_fail = sum(1 for f in self._files if f["status"] == "fail")
+        if self._batch_running:
+            cur = self._batch_current_index + 1 if self._batch_current_index >= 0 else 0
+            hdr = (f"📚 파일 큐 — {cur}/{n} 처리 중"
+                   f"  |  완료 {n_done}  |  실패 {n_fail}")
+        else:
+            hdr = (f"📚 파일 큐 {n}개"
+                   f"{f'  |  완료 {n_done}' if n_done else ''}"
+                   f"{f'  |  실패 {n_fail}' if n_fail else ''}"
+                   f"  |  Del 키로 항목 제거")
+        self._file_queue_label.configure(text=hdr)
+        icons = {"wait": "⏳", "processing": "🔄", "done": "✅", "fail": "❌"}
+        for f in self._files:
+            ico = icons.get(f["status"], "⏳")
+            self._file_listbox.insert(
+                "end", f"  {ico}  {os.path.basename(f['path'])}")
+        self._file_queue_frame.pack(fill="x", before=self._src_text)
+
+    def _clear_file_queue(self):
+        if self._batch_running:
+            return  # 처리 중에는 클리어 잠금
+        self._files = []
+        self._dropped_file_path = None
+        self._render_file_queue()
+        self._status_var.set("파일 큐 비움")
+
+    # 호환: 기존 _clear_file 호출자가 있는 경우 동일하게 동작
+    def _clear_file(self):
+        self._clear_file_queue()
+
+    def _on_listbox_delete(self, event):
+        if self._batch_running:
+            return
+        sel = list(self._file_listbox.curselection())
+        if not sel:
+            return
+        for idx in sorted(sel, reverse=True):
+            if 0 <= idx < len(self._files):
+                del self._files[idx]
+        self._render_file_queue()
+
+    def _on_listbox_double_click(self, event):
+        """더블클릭 → 해당 파일을 _src_text에 미리보기 로드."""
+        if self._batch_running:
+            return
+        sel = self._file_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if not (0 <= idx < len(self._files)):
+            return
+        try:
+            content = self._read_file_text(self._files[idx]["path"])
+        except Exception as e:
+            messagebox.showerror("파일 오류", str(e), parent=self)
+            return
+        self._src_text.delete("1.0", "end")
+        self._src_text.insert("end", content)
+        self._set_result("")
+        self._status_var.set(
+            f"미리보기: {os.path.basename(self._files[idx]['path'])}")
+
+    def _preview_first_file(self):
+        """큐의 첫 파일을 _src_text에 자동 로드 (사용자가 바로 텍스트 확인 가능)."""
+        if not self._files:
+            return
+        try:
+            content = self._read_file_text(self._files[0]["path"])
+        except Exception:
+            return
         self._src_text.delete("1.0", "end")
         self._src_text.insert("end", content)
         self._set_result("")
 
-        fname = os.path.basename(path)
-        self._file_bar_label.configure(text=f"📄 {fname}  —  번역 후 같은 폴더에 저장됩니다")
-        self._file_bar.pack(fill="x", before=self._src_text)
-        self._status_var.set(f"파일 로드 완료: {fname}  ({len(content):,}자)")
+    def _on_file_drop(self, event):
+        if self._batch_running:
+            self._status_var.set("배치 처리 중 — 완료 후 추가하세요.")
+            return
+        # tk.splitlist는 tkinterdnd2의 brace-감싸진 다중 경로를 정확히 분리
+        try:
+            paths = list(self.tk.splitlist(event.data))
+        except Exception:
+            paths = [event.data]
+        txt_paths = [p for p in paths if p and p.lower().endswith(".txt")]
+        skipped = len(paths) - len(txt_paths)
+        if not txt_paths:
+            if paths:
+                self._status_var.set(f"⚠ txt 파일만 지원합니다 ({skipped}개 무시)")
+            return
+        # 절대경로 normalize 후 중복 제거
+        existing = {os.path.normcase(os.path.abspath(f["path"])) for f in self._files}
+        added = 0
+        for p in txt_paths:
+            ap = os.path.abspath(p)
+            norm = os.path.normcase(ap)
+            if norm in existing:
+                continue
+            existing.add(norm)
+            self._files.append({"path": ap, "status": "wait"})
+            added += 1
+        # 큐가 처음 채워질 때 첫 파일 미리보기 로드
+        if added > 0 and not self._src_text.get("1.0", "end").strip():
+            self._preview_first_file()
+        self._render_file_queue()
+        msg = f"{added}개 파일 추가됨"
+        if skipped:
+            msg += f" (txt 아닌 파일 {skipped}개 무시)"
+        msg += f"  |  큐 총 {len(self._files)}개"
+        self._status_var.set(msg)
 
-    def _clear_file(self):
-        self._dropped_file_path = None
-        self._file_bar.pack_forget()
-        self._file_bar_label.configure(text="")
+    def _translate_title(self, title: str) -> str:
+        """파일명(제목)을 현재 선택된 번역기로 단발 번역.
+        검수·사용자 사전·추가 지시는 모두 OFF — 짧은 제목에 과한 비용 안 발생.
+        실패 시 원본 그대로 반환 (저장은 계속 진행)."""
+        title = (title or "").strip()
+        if not title:
+            return title
+        try:
+            api_id      = API_ID_BY_DISPLAY.get(self._api_var.get(), "openai")
+            translator  = TRANSLATORS[api_id]
+            codes       = LANG_CODES.get(api_id, {})
+            src_display = self._src_lang_var.get()
+            tgt_display = self._tgt_lang_var.get()
+            src_code    = codes.get(src_display, src_display)
+            tgt_code    = codes.get(tgt_display, tgt_display)
+            api_cfg = dict(self.cfg["apis"].get(api_id, {}))
+            api_cfg["_prompt"]        = ""
+            api_cfg["_dictionary"]    = ""
+            api_cfg["verify_enabled"] = False
+            out = translator.translate(title, src_code, tgt_code, api_cfg)
+            return ((out or "").strip()) or title
+        except Exception:
+            # 제목 번역이 실패해도 본문 저장은 막지 말 것
+            return title
 
     def _save_translated_file(self, result: str) -> str:
         path = self._dropped_file_path
         dir_name = os.path.dirname(path)
         base, ext = os.path.splitext(os.path.basename(path))
-        out_path = os.path.join(dir_name, f"{base}_번역{ext}")
+        translated_title = self._translate_title(base)
+        # 제목 번역 결과가 빈 문자열이거나 sanitize 후 빈 문자열이면 원본으로 폴백
+        safe_title = (
+            sanitize_filename(translated_title)
+            or sanitize_filename(base)
+            or "novel"
+        )
+        out_path = os.path.join(dir_name, f"[Ai 번역]{safe_title}{ext}")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(result)
         return out_path
@@ -1262,15 +1627,100 @@ class App(_AppBase):
 
     # ── 번역 실행 ─────────────────────────────────────────────────────────────
 
+    # ── 배치 처리 ─────────────────────────────────────────────────────────────
+
+    def _start_batch(self):
+        """파일 큐 순차 처리 시작. 'fail'은 'wait'으로 리셋(재시도), 'done'은 그대로."""
+        for f in self._files:
+            if f["status"] == "fail":
+                f["status"] = "wait"
+        if not any(f["status"] == "wait" for f in self._files):
+            self._status_var.set(
+                "처리할 대기 파일이 없습니다 — 모두 완료됐거나 큐가 비어있습니다.")
+            return
+        self._batch_running = True
+        self._batch_current_index = -1
+        self._cancel_translate = False
+        self._render_file_queue()
+        self._translate_next_in_batch()
+
+    def _translate_next_in_batch(self):
+        if self._cancel_translate:
+            self._on_batch_done(cancelled=True)
+            return
+        nxt = next((i for i, f in enumerate(self._files)
+                    if f["status"] == "wait"), None)
+        if nxt is None:
+            self._on_batch_done(cancelled=False)
+            return
+        f = self._files[nxt]
+        f["status"] = "processing"
+        self._batch_current_index = nxt
+        self._render_file_queue()
+        try:
+            content = self._read_file_text(f["path"])
+        except Exception as e:
+            f["status"] = "fail"
+            self._render_file_queue()
+            self._status_var.set(
+                f"파일 읽기 실패: {os.path.basename(f['path'])} — {e}")
+            self.after(300, self._translate_next_in_batch)
+            return
+        self._dropped_file_path = f["path"]
+        self._src_text.delete("1.0", "end")
+        self._src_text.insert("end", content)
+        self._set_result("")
+        self._status_var.set(
+            f"📚 {nxt + 1}/{len(self._files)} — "
+            f"{os.path.basename(f['path'])} 번역 시작")
+        # 현재 _src_text 내용을 인라인 번역 — _translate 의 본문 경로로 진입
+        # (배치 분기는 _batch_running=True 라서 건너뛰고 곧장 인라인 경로로)
+        self._translate()
+
+    def _on_batch_done(self, cancelled: bool):
+        self._batch_running = False
+        self._batch_current_index = -1
+        self._dropped_file_path = None
+        self._cancel_translate = False
+        n_total = len(self._files)
+        n_done  = sum(1 for f in self._files if f["status"] == "done")
+        n_fail  = sum(1 for f in self._files if f["status"] == "fail")
+        self._render_file_queue()
+        if cancelled:
+            self._status_var.set(
+                f"⏹ 배치 중단 — 완료 {n_done}/{n_total} (실패 {n_fail})")
+        elif n_fail:
+            self._status_var.set(
+                f"⚠ 배치 완료 — 성공 {n_done} · 실패 {n_fail} (총 {n_total})")
+            messagebox.showwarning(
+                "일부 파일 실패",
+                f"성공 {n_done}개 / 실패 {n_fail}개 / 총 {n_total}개\n\n"
+                f"실패한 파일은 ❌ 표시됩니다. 다시 [번역 실행]을 누르면 "
+                f"실패한 파일만 재시도합니다.",
+                parent=self)
+        else:
+            self._status_var.set(
+                f"✅ 배치 완료 — {n_done}개 모두 성공")
+
+    # ── 번역 실행 ─────────────────────────────────────────────────────────────
+
     def _translate(self):
-        # 번역 중이면 취소 토글
+        # 번역 중이면 취소 토글 (배치 중에도 동일 — 현재 파일이 끊기고 _on_translate_done에서 종료)
         if self._translating:
             self._cancel_translate = True
             self._status_var.set("취소 요청됨 — 현재 청크 완료 후 중단합니다.")
             return
 
+        # 큐가 있고 아직 배치 시작 전이면 → 배치 시작 (재진입은 _batch_running 가드로 회피)
+        if self._files and not self._batch_running:
+            self._start_batch()
+            return
+
         text = self._src_text.get("1.0", "end").strip()
         if not text:
+            # 배치 중인데 텍스트가 비었으면 (드물지만) 다음 파일로
+            if self._batch_running:
+                self.after(100, self._translate_next_in_batch)
             return
 
         api_id      = API_ID_BY_DISPLAY.get(self._api_var.get(), "openai")
@@ -1504,16 +1954,39 @@ class App(_AppBase):
         log_name = os.path.basename(log_path)
 
         # 드롭된 파일 번역 → 같은 폴더에 저장
+        save_ok = False
         if self._dropped_file_path and result.strip():
             try:
                 out_path = self._save_translated_file(result)
-                self._file_bar_label.configure(text=f"✅ 저장 완료: {out_path}")
                 base_msg = f"파일 저장 완료 → {os.path.basename(out_path)}"
+                save_ok = True
             except Exception as e:
                 base_msg = f"파일 저장 실패: {e}"
         else:
             base_msg = f"결과 {len(result):,}자"
 
+        # ── 배치 모드: 메시지박스 건너뛰고 다음 파일 schedule ──
+        if self._batch_running and 0 <= self._batch_current_index < len(self._files):
+            idx = self._batch_current_index
+            if cancelled:
+                # 사용자 취소 — 진행 파일은 이어서 진행 가능하게 둠
+                self._files[idx]["status"] = "fail"
+                self._render_file_queue()
+                self._on_batch_done(cancelled=True)
+                return
+            # 청크 일부 실패도 파일 단위로는 'fail' 처리
+            if ok < total or not save_ok:
+                self._files[idx]["status"] = "fail"
+            else:
+                self._files[idx]["status"] = "done"
+            self._render_file_queue()
+            self._status_var.set(
+                f"📚 {idx + 1}/{len(self._files)} {base_msg}  |  로그: {log_name}")
+            # 다음 파일로 (UI가 잠깐 숨 쉬게 0.5초 후)
+            self.after(500, self._translate_next_in_batch)
+            return
+
+        # ── 단일/인라인 모드: 기존 종료 로직 ──
         # 진행 파일이 남아 있는지 (= 드롭된 파일 + 미완료)
         resume_hint = ""
         if self._dropped_file_path and (cancelled or ok < total):
