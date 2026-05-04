@@ -1135,7 +1135,12 @@ class App(_AppBase):
 
         self._translating = False
         self._cancel_translate = False
-        self._dropped_file_path = None
+        self._dropped_file_path = None         # 현재 처리 중 파일 (배치 모드에서 파일별로 갱신)
+
+        # 다중 파일 큐 — 드롭된 파일들을 순차 번역
+        self._files = []                       # [{'path': abspath, 'status': 'wait|processing|done|fail'}, ...]
+        self._batch_running = False
+        self._batch_current_index = -1         # 현재 처리 중 인덱스 (-1 = idle)
 
         self._setup_style()
         self._build_ui()
@@ -1246,14 +1251,31 @@ class App(_AppBase):
         tk.Label(src_hdr, text="원본 텍스트", font=FONT_MAIN, bg=BG3, fg=FG2,
                  anchor="w").pack(side="left")
 
-        # 파일 드롭 정보 표시줄 (파일이 로드됐을 때만 표시)
-        self._file_bar = tk.Frame(src_box, bg="#2e3a2e")
-        self._file_bar_label = tk.Label(self._file_bar, text="", font=("Malgun Gothic", 8),
-                                        bg="#2e3a2e", fg="#80e080", anchor="w")
-        self._file_bar_label.pack(side="left", padx=8, pady=3, fill="x", expand=True)
-        tk.Button(self._file_bar, text="✕", font=("Malgun Gothic", 8),
+        # 파일 큐 — 드롭한 파일들을 모아서 순차 번역 (큐 비어있으면 숨김)
+        self._file_queue_frame = tk.Frame(src_box, bg="#2e3a2e")
+        _qhdr = tk.Frame(self._file_queue_frame, bg="#2e3a2e")
+        _qhdr.pack(fill="x")
+        self._file_queue_label = tk.Label(
+            _qhdr, text="", font=("Malgun Gothic", 8),
+            bg="#2e3a2e", fg="#80e080", anchor="w")
+        self._file_queue_label.pack(side="left", padx=8, pady=3, fill="x", expand=True)
+        tk.Button(_qhdr, text="✕", font=("Malgun Gothic", 8),
                   bg="#2e3a2e", fg="#80e080", relief="flat", padx=6, pady=1,
-                  cursor="hand2", command=self._clear_file).pack(side="right", padx=4)
+                  cursor="hand2", command=self._clear_file_queue
+                  ).pack(side="right", padx=4)
+        self._file_listbox = tk.Listbox(
+            self._file_queue_frame,
+            font=("Malgun Gothic", 9),
+            bg=BG3, fg=FG, selectbackground=ACCENT, selectforeground=BTN_FG,
+            relief="flat", bd=0, height=4, activestyle="none",
+            exportselection=False, highlightthickness=0)
+        self._file_listbox.pack(fill="x", padx=4, pady=(0, 4))
+        self._file_listbox.bind("<Delete>", self._on_listbox_delete)
+        self._file_listbox.bind("<Double-Button-1>", self._on_listbox_double_click)
+        # 호환: 기존 코드 일부가 _file_bar / _file_bar_label 을 참조하는 경우
+        # 동일한 Frame/Label 을 가리키도록 alias 유지
+        self._file_bar = self._file_queue_frame
+        self._file_bar_label = self._file_queue_label
 
         self._src_text = tk.Text(src_box, font=FONT_LARGE, bg=BG3, fg=FG,
                                  insertbackground=FG, relief="flat", bd=0,
@@ -1387,46 +1409,136 @@ class App(_AppBase):
         else:
             self._tgt_lang_var.set(src if src in LANGUAGES[1:] else "영어")
 
-    def _on_file_drop(self, event):
-        raw = event.data.strip()
-        # tkinterdnd2는 공백 포함 경로를 {}로 감쌈
-        if raw.startswith("{") and raw.endswith("}"):
-            raw = raw[1:-1]
-        # 여러 파일이 드롭된 경우 첫 번째만
-        path = raw.split("} {")[0].strip("{}")
+    # ── 파일 큐 ────────────────────────────────────────────────────────────
 
-        if not path.lower().endswith(".txt"):
-            self._status_var.set("txt 파일만 지원합니다.")
-            return
-
+    @staticmethod
+    def _read_file_text(path: str) -> str:
+        """파일을 utf-8 우선, 실패 시 cp949로 읽음. 둘 다 실패하면 예외 raise."""
         try:
             with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
+                return f.read()
         except UnicodeDecodeError:
-            try:
-                with open(path, "r", encoding="cp949") as f:
-                    content = f.read()
-            except Exception as e:
-                messagebox.showerror("파일 오류", f"파일을 읽을 수 없습니다:\n{e}", parent=self)
-                return
-        except Exception as e:
-            messagebox.showerror("파일 오류", f"파일을 읽을 수 없습니다:\n{e}", parent=self)
-            return
+            with open(path, "r", encoding="cp949") as f:
+                return f.read()
 
-        self._dropped_file_path = path
+    def _render_file_queue(self):
+        """_files 상태를 헤더 + Listbox로 렌더링. 큐 비어있으면 frame 숨김."""
+        self._file_listbox.delete(0, "end")
+        if not self._files:
+            self._file_queue_frame.pack_forget()
+            self._file_queue_label.configure(text="")
+            return
+        n = len(self._files)
+        n_done = sum(1 for f in self._files if f["status"] == "done")
+        n_fail = sum(1 for f in self._files if f["status"] == "fail")
+        if self._batch_running:
+            cur = self._batch_current_index + 1 if self._batch_current_index >= 0 else 0
+            hdr = (f"📚 파일 큐 — {cur}/{n} 처리 중"
+                   f"  |  완료 {n_done}  |  실패 {n_fail}")
+        else:
+            hdr = (f"📚 파일 큐 {n}개"
+                   f"{f'  |  완료 {n_done}' if n_done else ''}"
+                   f"{f'  |  실패 {n_fail}' if n_fail else ''}"
+                   f"  |  Del 키로 항목 제거")
+        self._file_queue_label.configure(text=hdr)
+        icons = {"wait": "⏳", "processing": "🔄", "done": "✅", "fail": "❌"}
+        for f in self._files:
+            ico = icons.get(f["status"], "⏳")
+            self._file_listbox.insert(
+                "end", f"  {ico}  {os.path.basename(f['path'])}")
+        self._file_queue_frame.pack(fill="x", before=self._src_text)
+
+    def _clear_file_queue(self):
+        if self._batch_running:
+            return  # 처리 중에는 클리어 잠금
+        self._files = []
+        self._dropped_file_path = None
+        self._render_file_queue()
+        self._status_var.set("파일 큐 비움")
+
+    # 호환: 기존 _clear_file 호출자가 있는 경우 동일하게 동작
+    def _clear_file(self):
+        self._clear_file_queue()
+
+    def _on_listbox_delete(self, event):
+        if self._batch_running:
+            return
+        sel = list(self._file_listbox.curselection())
+        if not sel:
+            return
+        for idx in sorted(sel, reverse=True):
+            if 0 <= idx < len(self._files):
+                del self._files[idx]
+        self._render_file_queue()
+
+    def _on_listbox_double_click(self, event):
+        """더블클릭 → 해당 파일을 _src_text에 미리보기 로드."""
+        if self._batch_running:
+            return
+        sel = self._file_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if not (0 <= idx < len(self._files)):
+            return
+        try:
+            content = self._read_file_text(self._files[idx]["path"])
+        except Exception as e:
+            messagebox.showerror("파일 오류", str(e), parent=self)
+            return
+        self._src_text.delete("1.0", "end")
+        self._src_text.insert("end", content)
+        self._set_result("")
+        self._status_var.set(
+            f"미리보기: {os.path.basename(self._files[idx]['path'])}")
+
+    def _preview_first_file(self):
+        """큐의 첫 파일을 _src_text에 자동 로드 (사용자가 바로 텍스트 확인 가능)."""
+        if not self._files:
+            return
+        try:
+            content = self._read_file_text(self._files[0]["path"])
+        except Exception:
+            return
         self._src_text.delete("1.0", "end")
         self._src_text.insert("end", content)
         self._set_result("")
 
-        fname = os.path.basename(path)
-        self._file_bar_label.configure(text=f"📄 {fname}  —  번역 후 같은 폴더에 저장됩니다")
-        self._file_bar.pack(fill="x", before=self._src_text)
-        self._status_var.set(f"파일 로드 완료: {fname}  ({len(content):,}자)")
-
-    def _clear_file(self):
-        self._dropped_file_path = None
-        self._file_bar.pack_forget()
-        self._file_bar_label.configure(text="")
+    def _on_file_drop(self, event):
+        if self._batch_running:
+            self._status_var.set("배치 처리 중 — 완료 후 추가하세요.")
+            return
+        # tk.splitlist는 tkinterdnd2의 brace-감싸진 다중 경로를 정확히 분리
+        try:
+            paths = list(self.tk.splitlist(event.data))
+        except Exception:
+            paths = [event.data]
+        txt_paths = [p for p in paths if p and p.lower().endswith(".txt")]
+        skipped = len(paths) - len(txt_paths)
+        if not txt_paths:
+            if paths:
+                self._status_var.set(f"⚠ txt 파일만 지원합니다 ({skipped}개 무시)")
+            return
+        # 절대경로 normalize 후 중복 제거
+        existing = {os.path.normcase(os.path.abspath(f["path"])) for f in self._files}
+        added = 0
+        for p in txt_paths:
+            ap = os.path.abspath(p)
+            norm = os.path.normcase(ap)
+            if norm in existing:
+                continue
+            existing.add(norm)
+            self._files.append({"path": ap, "status": "wait"})
+            added += 1
+        # 큐가 처음 채워질 때 첫 파일 미리보기 로드
+        if added > 0 and not self._src_text.get("1.0", "end").strip():
+            self._preview_first_file()
+        self._render_file_queue()
+        msg = f"{added}개 파일 추가됨"
+        if skipped:
+            msg += f" (txt 아닌 파일 {skipped}개 무시)"
+        msg += f"  |  큐 총 {len(self._files)}개"
+        self._status_var.set(msg)
 
     def _translate_title(self, title: str) -> str:
         """파일명(제목)을 현재 선택된 번역기로 단발 번역.
@@ -1515,15 +1627,100 @@ class App(_AppBase):
 
     # ── 번역 실행 ─────────────────────────────────────────────────────────────
 
+    # ── 배치 처리 ─────────────────────────────────────────────────────────────
+
+    def _start_batch(self):
+        """파일 큐 순차 처리 시작. 'fail'은 'wait'으로 리셋(재시도), 'done'은 그대로."""
+        for f in self._files:
+            if f["status"] == "fail":
+                f["status"] = "wait"
+        if not any(f["status"] == "wait" for f in self._files):
+            self._status_var.set(
+                "처리할 대기 파일이 없습니다 — 모두 완료됐거나 큐가 비어있습니다.")
+            return
+        self._batch_running = True
+        self._batch_current_index = -1
+        self._cancel_translate = False
+        self._render_file_queue()
+        self._translate_next_in_batch()
+
+    def _translate_next_in_batch(self):
+        if self._cancel_translate:
+            self._on_batch_done(cancelled=True)
+            return
+        nxt = next((i for i, f in enumerate(self._files)
+                    if f["status"] == "wait"), None)
+        if nxt is None:
+            self._on_batch_done(cancelled=False)
+            return
+        f = self._files[nxt]
+        f["status"] = "processing"
+        self._batch_current_index = nxt
+        self._render_file_queue()
+        try:
+            content = self._read_file_text(f["path"])
+        except Exception as e:
+            f["status"] = "fail"
+            self._render_file_queue()
+            self._status_var.set(
+                f"파일 읽기 실패: {os.path.basename(f['path'])} — {e}")
+            self.after(300, self._translate_next_in_batch)
+            return
+        self._dropped_file_path = f["path"]
+        self._src_text.delete("1.0", "end")
+        self._src_text.insert("end", content)
+        self._set_result("")
+        self._status_var.set(
+            f"📚 {nxt + 1}/{len(self._files)} — "
+            f"{os.path.basename(f['path'])} 번역 시작")
+        # 현재 _src_text 내용을 인라인 번역 — _translate 의 본문 경로로 진입
+        # (배치 분기는 _batch_running=True 라서 건너뛰고 곧장 인라인 경로로)
+        self._translate()
+
+    def _on_batch_done(self, cancelled: bool):
+        self._batch_running = False
+        self._batch_current_index = -1
+        self._dropped_file_path = None
+        self._cancel_translate = False
+        n_total = len(self._files)
+        n_done  = sum(1 for f in self._files if f["status"] == "done")
+        n_fail  = sum(1 for f in self._files if f["status"] == "fail")
+        self._render_file_queue()
+        if cancelled:
+            self._status_var.set(
+                f"⏹ 배치 중단 — 완료 {n_done}/{n_total} (실패 {n_fail})")
+        elif n_fail:
+            self._status_var.set(
+                f"⚠ 배치 완료 — 성공 {n_done} · 실패 {n_fail} (총 {n_total})")
+            messagebox.showwarning(
+                "일부 파일 실패",
+                f"성공 {n_done}개 / 실패 {n_fail}개 / 총 {n_total}개\n\n"
+                f"실패한 파일은 ❌ 표시됩니다. 다시 [번역 실행]을 누르면 "
+                f"실패한 파일만 재시도합니다.",
+                parent=self)
+        else:
+            self._status_var.set(
+                f"✅ 배치 완료 — {n_done}개 모두 성공")
+
+    # ── 번역 실행 ─────────────────────────────────────────────────────────────
+
     def _translate(self):
-        # 번역 중이면 취소 토글
+        # 번역 중이면 취소 토글 (배치 중에도 동일 — 현재 파일이 끊기고 _on_translate_done에서 종료)
         if self._translating:
             self._cancel_translate = True
             self._status_var.set("취소 요청됨 — 현재 청크 완료 후 중단합니다.")
             return
 
+        # 큐가 있고 아직 배치 시작 전이면 → 배치 시작 (재진입은 _batch_running 가드로 회피)
+        if self._files and not self._batch_running:
+            self._start_batch()
+            return
+
         text = self._src_text.get("1.0", "end").strip()
         if not text:
+            # 배치 중인데 텍스트가 비었으면 (드물지만) 다음 파일로
+            if self._batch_running:
+                self.after(100, self._translate_next_in_batch)
             return
 
         api_id      = API_ID_BY_DISPLAY.get(self._api_var.get(), "openai")
@@ -1757,16 +1954,39 @@ class App(_AppBase):
         log_name = os.path.basename(log_path)
 
         # 드롭된 파일 번역 → 같은 폴더에 저장
+        save_ok = False
         if self._dropped_file_path and result.strip():
             try:
                 out_path = self._save_translated_file(result)
-                self._file_bar_label.configure(text=f"✅ 저장 완료: {out_path}")
                 base_msg = f"파일 저장 완료 → {os.path.basename(out_path)}"
+                save_ok = True
             except Exception as e:
                 base_msg = f"파일 저장 실패: {e}"
         else:
             base_msg = f"결과 {len(result):,}자"
 
+        # ── 배치 모드: 메시지박스 건너뛰고 다음 파일 schedule ──
+        if self._batch_running and 0 <= self._batch_current_index < len(self._files):
+            idx = self._batch_current_index
+            if cancelled:
+                # 사용자 취소 — 진행 파일은 이어서 진행 가능하게 둠
+                self._files[idx]["status"] = "fail"
+                self._render_file_queue()
+                self._on_batch_done(cancelled=True)
+                return
+            # 청크 일부 실패도 파일 단위로는 'fail' 처리
+            if ok < total or not save_ok:
+                self._files[idx]["status"] = "fail"
+            else:
+                self._files[idx]["status"] = "done"
+            self._render_file_queue()
+            self._status_var.set(
+                f"📚 {idx + 1}/{len(self._files)} {base_msg}  |  로그: {log_name}")
+            # 다음 파일로 (UI가 잠깐 숨 쉬게 0.5초 후)
+            self.after(500, self._translate_next_in_batch)
+            return
+
+        # ── 단일/인라인 모드: 기존 종료 로직 ──
         # 진행 파일이 남아 있는지 (= 드롭된 파일 + 미완료)
         resume_hint = ""
         if self._dropped_file_path and (cancelled or ok < total):
